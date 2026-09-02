@@ -136,53 +136,48 @@ cp .env.example .env
 
 ## Smart Contract Deployment
 
+The `ContentRegistry` contract is already deployed on **Ethereum Sepolia**:
+
+- **Contract Address:** [`0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21`](https://sepolia.etherscan.io/address/0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21)
+- **Deployment Transaction:** [`0xc96cff185e7d482fc64a76a2fa2a4a907fa0dcd2bc0b760d76447d9789c90eb5`](https://sepolia.etherscan.io/tx/0xc96cff185e7d482fc64a76a2fa2a4a907fa0dcd2bc0b760d76447d9789c90eb5)
+
+If you wish to redeploy your own instance:
+
 ```bash
 python scripts/deploy_contract.py
 ```
-
-Output:
-```
-============================================================
-  ContentRegistry — Contract Deployment
-============================================================
-
-  [1/3] Compiling ContentRegistry.sol ...
-        ✓ Compilation successful
-
-  [2/3] Connecting to Ethereum Sepolia ...
-        ✓ Connected
-        Deployer: 0x...
-        Balance:  0.1 ETH
-
-  [3/3] Deploying contract ...
-        TX: 0x...
-        ✓ Contract deployed!
-
-  Contract deployed:
-  0x1234567890abcdef...
-
-  Add to your .env file:
-  CONTRACT_ADDRESS=0x1234567890abcdef...
-```
-
-Copy the contract address to your `.env` file.
 
 ---
 
 ## How to Run
 
-### Full Pipeline
+### Full Pipeline (Searches Open Web & Picks Strongest Match)
 
 ```bash
-python -m app.main --image ./data/input/face.jpg
+python -m app.main --image ./data/input/test_face.jpg
 ```
 
-With custom threshold:
+### Target a Specific Platform (Optional)
+
+You can filter candidate results to a specific social/web platform:
+
 ```bash
-python -m app.main --image ./data/input/face.jpg --threshold 0.60
+# Target Wikipedia
+python -m app.main --image ./data/input/test_face.jpg --platform wikipedia
+
+# Target Instagram
+python -m app.main --image ./data/input/test_face.jpg --platform instagram
+
+# Target X / Twitter
+python -m app.main --image ./data/input/test_face.jpg --platform x.com
 ```
 
-### Example Output
+With custom threshold (default: 0.70):
+```bash
+python -m app.main --image ./data/input/test_face.jpg --threshold 0.85
+```
+
+### Example Terminal Output
 
 ```
 ============================================================
@@ -198,45 +193,60 @@ python -m app.main --image ./data/input/face.jpg --threshold 0.60
         Provider: SerpAPI Google Lens
         Searching...
         ✓ Search completed
-        ✓ 18 candidates discovered
+        ✓ 59 candidates discovered across the web
+        Sources found: AMDB, Amazon.com, BBC, Bollywood Hungama, Britannica (+35 more)
 
   [3/7] FACE MATCHING
-        Analyzing candidates...
+        Analyzing candidate face similarity...
 
-        #1  Similarity: 91.4%  instagram.com
-        #2  Similarity: 87.2%  twitter.com
-        #3  Similarity: 73.6%  linkedin.com
+        #1   Similarity: 96.8%  [Reddit]
+        #2   Similarity: 96.8%  [Instagram]
+        #3   Similarity: 96.6%  [Wikipedia]
+        #4   Similarity: 96.4%  [x.com]
+        #5   Similarity: 96.3%  [Wikimedia Commons]
+        #6   Similarity: 96.2%  [Bear 5 Wiki | Fandom]
+        #7   Similarity: 88.5%  [Wikipedia]
+        #8   Similarity: 87.2%  [Wikimedia Commons]
+        #9   Similarity: 84.9%  [YouTube]
+        #10  Similarity: 83.6%  [The Daily Beast]
 
-        ✓ Strongest candidate selected (Similarity: 91.4%)
+        ✓ Strongest candidate selected: Reddit (Similarity: 96.8%)
 
   [4/7] CONTENT RETRIEVAL
         ✓ Matching content retrieved
 
         Source:
-        https://www.instagram.com/p/...
+        https://www.reddit.com/r/theydidthemath/comments/...
+        Title: Reddit
+        Platform: www.reddit.com
+
+        ✓ Image downloaded (7729 bytes)
 
   [5/7] FINGERPRINT
         Algorithm: SHA-256
 
-        8f91c2f3d91a8c7e4b2a...
+        3dfa3770bf9bf062217952d2b2f8526a08192a5a886a64ffa63b068911e2bfeb
 
   [6/7] BLOCKCHAIN
         Network: Ethereum Sepolia
+        Contract: 0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21
+        Submitting transaction...
         ✓ Transaction confirmed
 
         TX:
-        0xabc123...
+        0x9753a6661c6bc3d1be336529621e2faa704304f071715c885e25f82ae91a0c06
+        Block: 11619452
 
   [7/7] VERIFICATION
         Local hash:
-        8f91c2f3d91a8c7e4b2a...
+        3dfa3770bf9bf062217952d2b2f8526a08192a5a886a64ffa63b068911e2bfeb
 
         On-chain: ✓ Hash found
 
         ✓ CONTENT VERIFIED
 
   Record saved:
-  data/results/20260902_100000_record.json
+  data/results/20260902_120214_record.json
 
 ============================================================
 ```
