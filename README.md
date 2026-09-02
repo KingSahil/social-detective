@@ -65,6 +65,40 @@ Blockchain record → Verification
 
 ---
 
+## How It Works (In Plain English)
+
+> *"Think of FaceTrace as an automated digital detective and public notary."*
+>
+> You provide a face image $\rightarrow$ it scours the internet for matching social media posts $\rightarrow$ then locks proof of what it discovered onto the Ethereum blockchain so **no one can ever edit, fake, or tamper with the evidence.**
+
+### The 7 Steps Explained
+
+1. **Face Scan (*Turning a face into math*)**:
+   Instead of storing raw images, AI analyzes the unique facial geometry (eye spacing, jawline, nose contours) and converts it into a 512-number coordinate ("embedding"). This allows the system to recognize the person even with different lighting, angles, or hairstyles.
+
+2. **Open Web Search (*The detective search*)**:
+   The query photo is uploaded to Google Lens via SerpAPI to conduct a **live, runtime reverse-image search** across dozens of platforms including **Reddit, Instagram, X/Twitter, Facebook, and Wikipedia**.
+
+3. **Digital Lineup (*Face similarity ranking*)**:
+   The application downloads candidate images found online and runs facial recognition on each one, computing a mathematical similarity score (e.g., *96.8% match*). The candidate with the strongest face similarity is selected.
+
+4. **Evidence Collection (*Capturing the post*)**:
+   Public metadata from the winning post is extracted: source URL, page title, text, domain, and the raw image bytes.
+
+5. **Digital Wax Seal (*SHA-256 fingerprinting*)**:
+   The post metadata and raw image bytes are packaged into a deterministic canonical structure and hashed using SHA-256. If even a single word in the post or a single pixel in the image is changed later, this fingerprint changes completely.
+
+6. **Notarizing on the Blockchain (*Permanent public record*)**:
+   The 32-byte content hash is registered onto the **Ethereum Sepolia** testnet via a smart contract (`ContentRegistry.sol`).
+   > **Privacy Note:** No private information, face images, or biometric face vectors are ever uploaded on-chain. Only the cryptographic content fingerprint is stored.
+
+7. **Verification & Tamper Detection (*Catching modifications*)**:
+   Anyone can re-verify the saved investigation file at any point in the future:
+   - **If unaltered**: Local hash matches the on-chain hash $\rightarrow$ `✓ CONTENT VERIFIED`
+   - **If modified**: Any altered text or replaced image changes the local hash $\rightarrow$ `✗ TAMPER DETECTED`
+
+---
+
 ## Tech Stack
 
 | Component | Technology |
