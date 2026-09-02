@@ -1,0 +1,37 @@
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Data (keep structure, ignore large files)
+data/input/*.jpg
+data/input/*.png
+data/input/*.jpeg
+data/results/*.json
+
+# InsightFace models cache
+models/
+
+# Compiled contracts
+contracts/*.json
