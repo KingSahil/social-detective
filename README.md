@@ -76,6 +76,10 @@ Blockchain record → Verification
 1. **Face Scan (*Turning a face into math*)**:
    Instead of storing raw images, AI analyzes the unique facial geometry (eye spacing, jawline, nose contours) and converts it into a 512-number coordinate ("embedding"). This allows the system to recognize the person even with different lighting, angles, or hairstyles.
 
+   <p align="center">
+     <img src="docs/assets/face_embedding_concept.jpg" alt="Understanding AI Face Embedding and Facial Geometry" width="750"/>
+   </p>
+
 2. **Open Web Search (*The detective search*)**:
    The query photo is uploaded to Google Lens via SerpAPI to conduct a **live, runtime reverse-image search** across dozens of platforms including **Reddit, Instagram, X/Twitter, Facebook, and Wikipedia**.
 
