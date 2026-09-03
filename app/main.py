@@ -169,39 +169,19 @@ def run_pipeline(
 
         from app.config import require_search_config
         from app.search import SerpAPIProvider
+        from app.matcher import FaceMatcher
         import tempfile
         import cv2
 
         api_key = require_search_config()
         search_provider = SerpAPIProvider(api_key=api_key)
         _info(f"Provider: {search_provider.PROVIDER_NAME}")
-
-        # Auto-crop face to prevent clothing/background from diverting Google Lens into shopping catalogs
-        search_image_path = str(image_path_obj)
-        temp_crop_path = None
-        try:
-            cropped = fp.get_face_crop(image_path_obj, margin=0.35)
-            if cropped is not None:
-                tmp = tempfile.NamedTemporaryFile(suffix="_face_crop.jpg", delete=False)
-                temp_crop_path = tmp.name
-                tmp.close()
-                cv2.imwrite(temp_crop_path, cropped)
-                search_image_path = temp_crop_path
-                _info("Optimized search query: generated portrait face crop")
-        except Exception:
-            pass
-
         _info("Searching...")
+
         try:
-            search_result = search_provider.search(search_image_path)
+            search_result = search_provider.search(str(image_path_obj))
         except Exception as e:
             _fatal(f"Search failed: {e}")
-        finally:
-            if temp_crop_path and Path(temp_crop_path).exists():
-                try:
-                    Path(temp_crop_path).unlink()
-                except OSError:
-                    pass
 
         candidate_count = len(search_result.candidates)
         if candidate_count == 0:
@@ -254,6 +234,39 @@ def run_pipeline(
     matcher = FaceMatcher(fp)
     all_matches = matcher.match_and_rank(query_embedding, search_candidates)
     matches = [m for m in all_matches if m.similarity >= threshold]
+
+    # If no matches above threshold and we used open web search, try fallback to cropped face
+    if not matches and not target:
+        cropped = fp.get_face_crop(image_path_obj, margin=0.35)
+        if cropped is not None:
+            _info("No candidates above threshold with original image.")
+            _info("Retrying web search with focused portrait face crop...")
+            print()
+
+            temp_crop_path = None
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix="_face_crop.jpg", delete=False)
+                temp_crop_path = tmp.name
+                tmp.close()
+                cv2.imwrite(temp_crop_path, cropped)
+
+                crop_search_result = search_provider.search(temp_crop_path)
+                if crop_search_result.candidates:
+                    _ok(f"{len(crop_search_result.candidates)} candidates discovered from cropped face search")
+                    _info("Analyzing cropped face candidate similarity...")
+                    print()
+                    crop_matches = matcher.match_and_rank(query_embedding, crop_search_result.candidates)
+                    if crop_matches:
+                        all_matches = crop_matches
+                        matches = [m for m in all_matches if m.similarity >= threshold]
+            except Exception:
+                pass
+            finally:
+                if temp_crop_path and Path(temp_crop_path).exists():
+                    try:
+                        Path(temp_crop_path).unlink()
+                    except OSError:
+                        pass
 
     # Display top results (show up to 10)
     display_matches = all_matches[:10]
