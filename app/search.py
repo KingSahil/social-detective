@@ -173,13 +173,24 @@ class SerpAPIProvider(SearchProvider):
         except Exception:
             pass
 
+        import time
+        upload_result = None
+        image_id = None
         try:
-            upload_result = client.upload_image(upload_path)
-            image_id = upload_result.get("image_id")
+            for attempt in range(3):
+                try:
+                    upload_result = client.upload_image(upload_path)
+                    image_id = upload_result.get("image_id")
+                    if image_id:
+                        break
+                except Exception as e:
+                    if "429" in str(e) and attempt < 2:
+                        time.sleep(2.0 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"Image upload to SerpAPI failed: {e}")
+
             if not image_id:
                 raise RuntimeError(f"Upload succeeded but no image_id returned: {upload_result}")
-        except Exception as e:
-            raise RuntimeError(f"Image upload to SerpAPI failed: {e}")
         finally:
             if temp_upload_file and Path(temp_upload_file).exists():
                 try:
@@ -919,6 +930,227 @@ class LinkedInPostProvider(SearchProvider):
         )
 
     def search(self, image_path: str | Path | None = None) -> SearchResult:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+
+# ---------------------------------------------------------------------------
+# Instagram Profile & Post Provider (OSINT Social Pivot)
+# ---------------------------------------------------------------------------
+
+class InstagramProfileProvider(SearchProvider):
+    """
+    Discovers public Instagram posts and reels for suspected handles and their associates.
+    Uses targeted search engine dorks (DuckDuckGo engine via SerpAPI, with Google fallback)
+    and unpacks multi-slide carousels (GraphSidecar) via Instaloader to evaluate all faces.
+    """
+
+    PROVIDER_NAME = "Instagram Profile & Post Discovery"
+
+    def __init__(
+        self,
+        handle: str | None = None,
+        api_key: str | None = None,
+        timeout: float = 6.0,
+    ):
+        self.handle = handle.lstrip("@").strip() if handle else None
+        self._api_key = api_key
+        self._timeout = timeout
+
+        if not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key:
+            raise RuntimeError(
+                "SERPAPI_KEY is not set or contains a placeholder. "
+                "Set a valid SERPAPI_KEY in your .env file."
+            )
+
+    def search_handles(
+        self,
+        handles: list[str],
+        contexts: list[str] | None = None,
+        max_handles: int = 6,
+    ) -> SearchResult:
+        """
+        Sweeps multiple candidate handles and pivots on tagged associates.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if not handles:
+            return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+        try:
+            import serpapi as serpapi_mod
+        except ImportError:
+            raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+
+        client = serpapi_mod.Client(api_key=self._api_key)
+        clean_handles = [h.lstrip("@").strip() for h in handles if h and h.strip()]
+        # Prioritize personal handles over generic terms
+        clean_handles = [h for h in clean_handles if h.lower() not in {"popular", "instagram", "posts", "post"}]
+        clean_handles = clean_handles[:max_handles]
+
+        # Build initial queries
+        queries: list[str] = []
+        for h in clean_handles:
+            queries.append(f"site:instagram.com {h}")
+            queries.append(f"site:instagram.com/p/ {h}")
+            queries.append(f"site:instagram.com/reel/ {h}")
+            if contexts:
+                for ctx in contexts[:2]:
+                    queries.append(f"site:instagram.com {h} {ctx}")
+
+        discovered_shortcodes: set[str] = set()
+        discovered_tags: set[str] = set()
+
+        def _execute_query(q: str):
+            res_codes = set()
+            res_tags = set()
+            # 1. Try SerpAPI if available and not exhausted
+            try:
+                for engine in ["duckduckgo", "google"]:
+                    for attempt in range(2):
+                        try:
+                            res = client.search({"engine": engine, "q": q})
+                            for item in res.get("organic_results", []):
+                                link = item.get("link", "")
+                                title = item.get("title", "")
+                                snippet = item.get("snippet", "")
+                                m = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", link)
+                                if m:
+                                    res_codes.add(m.group(1))
+                                tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {snippet}")
+                                for t in tags:
+                                    t_clean = t.lower()
+                                    if t_clean not in [h.lower() for h in clean_handles]:
+                                        res_tags.add(t)
+                            if res_codes:
+                                break
+                        except Exception as e:
+                            if "429" in str(e):
+                                time.sleep(1.0 * (attempt + 1))
+                                continue
+                            break
+                    if res_codes:
+                        break
+            except Exception:
+                pass
+
+            # 2. Free DDGS fallback if no codes yet or SerpAPI is out of quota
+            if not res_codes:
+                try:
+                    from ddgs import DDGS
+                    d = DDGS()
+                    for it in d.text(q, max_results=15):
+                        href = it.get("href", "")
+                        title = it.get("title", "")
+                        body = it.get("body", "")
+                        m = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", href)
+                        if m:
+                            res_codes.add(m.group(1))
+                        tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {body}")
+                        for t in tags:
+                            t_clean = t.lower()
+                            if t_clean not in [h.lower() for h in clean_handles]:
+                                res_tags.add(t)
+                except Exception:
+                    pass
+
+            return res_codes, res_tags
+
+        # Execute hop 1 queries concurrently
+        with ThreadPoolExecutor(max_workers=min(len(queries), 6) or 1) as pool:
+            for codes, tags in pool.map(_execute_query, queries):
+                discovered_shortcodes.update(codes)
+                discovered_tags.update(tags)
+
+        # 2nd-hop pivot on discovered collaborator tags (co-occurring with handles)
+        valid_tags = [
+            t for t in discovered_tags
+            if not any(k in t.lower() for k in ["cess", "group", "titans", "club", "event", "community"])
+        ][:6]
+
+        if valid_tags:
+            hop2_queries = []
+            for t in valid_tags:
+                hop2_queries.append(f"site:instagram.com {t}")
+                for h in clean_handles[:2]:
+                    hop2_queries.append(f"site:instagram.com {h} {t}")
+
+            with ThreadPoolExecutor(max_workers=min(len(hop2_queries), 6) or 1) as pool:
+                for codes, _ in pool.map(_execute_query, hop2_queries):
+                    discovered_shortcodes.update(codes)
+
+        # Now unpack discovered shortcodes into Candidates (including carousels)
+        candidates: list[Candidate] = []
+
+        def _unpack_shortcode(sc: str) -> list[Candidate]:
+            items: list[Candidate] = []
+            try:
+                import instaloader
+                L = instaloader.Instaloader()
+                post = instaloader.Post.from_shortcode(L.context, sc)
+                caption = (post.caption or "").strip()
+                caption_snip = caption[:80].replace("\n", " ")
+
+                if post.typename == "GraphSidecar":
+                    for i, node in enumerate(post.get_sidecar_nodes()):
+                        items.append(Candidate(
+                            image_url=node.display_url,
+                            source_url=f"https://www.instagram.com/p/{sc}/?img_index={i+1}",
+                            title=f"{post.owner_username} on Instagram: \"{caption_snip}...\"",
+                            domain="instagram.com",
+                        ))
+                elif post.typename == "GraphImage" or post.typename == "GraphVideo":
+                    items.append(Candidate(
+                        image_url=post.url,
+                        source_url=f"https://www.instagram.com/p/{sc}/" if post.typename == "GraphImage" else f"https://www.instagram.com/reel/{sc}/",
+                        title=f"{post.owner_username} on Instagram: \"{caption_snip}...\"",
+                        domain="instagram.com",
+                    ))
+            except Exception:
+                # Fallback to public embed endpoint
+                try:
+                    embed_url = f"https://www.instagram.com/p/{sc}/embed/"
+                    headers = {
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        )
+                    }
+                    r = requests.get(embed_url, headers=headers, timeout=self._timeout)
+                    if r.status_code == 200:
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        for img in soup.find_all("img"):
+                            src = img.get("src")
+                            if src and ("fbcdn" in src or "cdninstagram" in src):
+                                items.append(Candidate(
+                                    image_url=src,
+                                    source_url=f"https://www.instagram.com/p/{sc}/",
+                                    title=f"Instagram Post {sc}",
+                                    domain="instagram.com",
+                                ))
+                                break
+                except Exception:
+                    pass
+            return items
+
+        with ThreadPoolExecutor(max_workers=min(len(discovered_shortcodes), 8) or 1) as pool:
+            for unpacked_list in pool.map(_unpack_shortcode, sorted(discovered_shortcodes)):
+                candidates.extend(unpacked_list)
+
+        return SearchResult(
+            candidates=candidates,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={
+                "shortcodes": list(discovered_shortcodes),
+                "count": len(candidates),
+                "tags": list(discovered_tags),
+            },
+        )
+
+    def search(self, image_path: str | Path | None = None) -> SearchResult:
+        if self.handle:
+            return self.search_handles([self.handle])
         timestamp = datetime.now(timezone.utc).isoformat()
         return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
 

@@ -206,6 +206,8 @@ def run_pipeline(
             SerpAPIProvider,
             YandexProvider,
             TwitterProfileProvider,
+            InstagramProfileProvider,
+            SearchResult,
             extract_social_handles,
             find_social_handles_from_subject_memory,
         )
@@ -224,20 +226,17 @@ def run_pipeline(
 
         try:
             search_result = search_provider.search(str(image_path_obj))
+            candidate_count = len(search_result.candidates)
+            _ok("Search completed")
+            _ok(f"{candidate_count} candidates discovered across the web")
         except Exception as e:
-            _fatal(f"Search failed: {e}")
-
-        candidate_count = len(search_result.candidates)
-        if candidate_count == 0:
-            _fail("No candidates found")
-            print()
-            print("  The search returned no visual matches.")
-            print("  Try a different image or check your SerpAPI quota.")
-            print()
-            sys.exit(1)
-
-        _ok("Search completed")
-        _ok(f"{candidate_count} candidates discovered across the web")
+            _info(f"Visual reverse search engine notice: {e}")
+            search_result = SearchResult(
+                candidates=[],
+                provider=search_provider.PROVIDER_NAME,
+                searched_at=datetime.now(timezone.utc).isoformat(),
+            )
+            candidate_count = 0
 
         # Automated Cross-Platform Social Pivoting (OSINT Discovery)
         _info("Scanning cross-platform social identity memory...")
@@ -247,7 +246,6 @@ def run_pipeline(
 
         if all_pivot_handles:
             _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles[:4]])}" + (f" (+{len(all_pivot_handles)-4} more)" if len(all_pivot_handles) > 4 else ""))
-            tw_added = 0
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             def _fetch_tw(h: str):
@@ -257,16 +255,36 @@ def run_pipeline(
                 except Exception:
                     return h, None
 
-            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles), 6)) as pool:
+            def _fetch_ig():
+                try:
+                    ig_prov = InstagramProfileProvider(api_key=api_key)
+                    from app.search import extract_associate_network_leads
+                    _, contexts = extract_associate_network_leads()
+                    return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
+                except Exception:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 1, 8)) as pool:
                 futures = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
+                ig_fut = pool.submit(_fetch_ig)
+
                 for fut in as_completed(futures):
                     h, tw_res = fut.result()
                     if tw_res and tw_res.candidates:
                         search_result.candidates.extend(tw_res.candidates)
-                        tw_added += len(tw_res.candidates)
                         _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
-            if tw_added > 0:
-                candidate_count = len(search_result.candidates)
+
+                ig_res = ig_fut.result()
+                if ig_res and ig_res.candidates:
+                    search_result.candidates.extend(ig_res.candidates)
+                    _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+
+            candidate_count = len(search_result.candidates)
+
+        if candidate_count == 0:
+            _fail("No candidates discovered across visual reverse search or social identity memory.")
+            print()
+            sys.exit(1)
 
         # Show platforms discovered across the web
         discovered_platforms = sorted({c.domain for c in search_result.candidates if c.domain})

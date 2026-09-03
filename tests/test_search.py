@@ -278,3 +278,53 @@ class TestTwitterProfileProvider:
         assert "7467434164741517312" in res.candidates[0].source_url
 
 
+    def test_instagram_profile_provider_requires_api_key(self):
+        from app.search import InstagramProfileProvider
+        with pytest.raises(RuntimeError, match="SERPAPI_KEY is not set"):
+            InstagramProfileProvider(api_key=None)
+
+
+    def test_instagram_profile_provider_mocked_search(self, monkeypatch):
+        from app.search import InstagramProfileProvider
+        import instaloader
+
+        mock_serp = MagicMock()
+        mock_client = MagicMock()
+        mock_serp.Client.return_value = mock_client
+        mock_client.search.return_value = {
+            "organic_results": [
+                {
+                    "link": "https://www.instagram.com/p/DNQM2qFvvTv/",
+                    "title": "Sahil Gupta | @raghavsharma1504 , @shekhar_shashank07 | Instagram",
+                    "snippet": "Friends meetup at GNDU",
+                }
+            ]
+        }
+        monkeypatch.setattr("serpapi.Client", mock_serp.Client)
+
+        # Mock instaloader Post
+        mock_node1 = MagicMock()
+        mock_node1.display_url = "https://instagram.fluh/slide1.webp"
+        mock_node2 = MagicMock()
+        mock_node2.display_url = "https://instagram.fluh/slide2.webp"
+
+        mock_post = MagicMock()
+        mock_post.typename = "GraphSidecar"
+        mock_post.owner_username = "supreme__sahil"
+        mock_post.caption = "@raghavsharma1504 , @shekhar_shashank07"
+        mock_post.get_sidecar_nodes.return_value = [mock_node1, mock_node2]
+
+        monkeypatch.setattr("instaloader.Post.from_shortcode", lambda ctx, sc: mock_post)
+
+        prov = InstagramProfileProvider(api_key="valid_key")
+        res = prov.search_handles(["supreme__sahil"])
+
+        assert len(res.candidates) == 2
+        assert res.candidates[0].domain == "instagram.com"
+        assert "DNQM2qFvvTv" in res.candidates[0].source_url
+        assert "img_index=1" in res.candidates[0].source_url
+        assert res.candidates[0].image_url == "https://instagram.fluh/slide1.webp"
+        assert "img_index=2" in res.candidates[1].source_url
+
+
+
