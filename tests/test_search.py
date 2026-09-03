@@ -1,5 +1,6 @@
 """Tests for search providers (mock only — no API key required)."""
 
+import json
 import pytest
 from datetime import datetime
 
@@ -213,4 +214,67 @@ class TestTwitterProfileProvider:
         assert "kingsahil" in recalled
         assert "supreme__sahil" in recalled
         assert "blinky_ai" in recalled
+
+
+    def test_extract_associate_network_leads(self, tmp_path):
+        from app.search import extract_associate_network_leads
+
+        record = {
+            "content": {
+                "title": "#hackhazards26 by Namespace | Sahil Gupta",
+                "text": "Excited to compete with Sparsh Khanna, Gourish Julka, and Meharwan Singh!",
+            },
+            "match": {"title": "Sahil Gupta on LinkedIn"},
+        }
+        rec_file = tmp_path / "rec.json"
+        rec_file.write_text(json.dumps(record), encoding="utf-8")
+
+        names, contexts = extract_associate_network_leads(results_dir=tmp_path)
+        assert "Sparsh Khanna" in names
+        assert "Gourish Julka" in names
+        assert "Meharwan Singh" in names
+        assert "Hackhazards 26" in contexts or "Namespace" in contexts
+
+
+    def test_linkedin_post_provider_requires_api_key(self):
+        from app.search import LinkedInPostProvider
+        with pytest.raises(RuntimeError, match="SERPAPI_KEY is not set"):
+            LinkedInPostProvider(api_key=None)
+
+
+    def test_linkedin_post_provider_mocked_search(self, monkeypatch):
+        from app.search import LinkedInPostProvider
+        import types
+
+        mock_serp = MagicMock()
+        mock_client = MagicMock()
+        mock_serp.Client.return_value = mock_client
+        mock_client.search.return_value = {
+            "organic_results": [
+                {
+                    "link": "https://www.linkedin.com/posts/khannasparsh_hackhazards-activity-7467434164741517312-abcd",
+                    "title": "Sparsh post",
+                }
+            ]
+        }
+        monkeypatch.setattr("serpapi.Client", mock_serp.Client)
+
+        # Mock requests.get for og:image
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = """
+        <html><head>
+        <meta property="og:image" content="https://media.licdn.com/dms/image/v2/test.jpg" />
+        <meta property="og:title" content="Sparsh Khanna's Post" />
+        </head></html>
+        """
+        monkeypatch.setattr("requests.get", lambda *a, **kw: mock_resp)
+
+        prov = LinkedInPostProvider(api_key="valid_key")
+        res = prov.search_leads(names=["Sparsh Khanna"], contexts=["Hackhazards"])
+        assert len(res.candidates) == 1
+        assert res.candidates[0].domain == "linkedin.com"
+        assert res.candidates[0].image_url == "https://media.licdn.com/dms/image/v2/test.jpg"
+        assert "7467434164741517312" in res.candidates[0].source_url
+
 

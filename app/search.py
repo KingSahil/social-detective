@@ -802,6 +802,191 @@ def find_social_handles_from_subject_memory(
 
 
 # ---------------------------------------------------------------------------
+# LinkedIn Post Provider — Deep public post discovery via targeted search
+# ---------------------------------------------------------------------------
+
+class LinkedInPostProvider(SearchProvider):
+    """
+    Discovers candidate LinkedIn posts for investigation targets or associate leads.
+    Searches public posts via SerpAPI (DuckDuckGo engine, with Google fallback),
+    extracts open-graph images and metadata without hitting LinkedIn's authwall.
+    """
+
+    PROVIDER_NAME = "LinkedIn Post Discovery"
+
+    def __init__(self, api_key: str | None = None, timeout: float = 6.0):
+        self._api_key = api_key
+        self._timeout = timeout
+
+        if not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key:
+            raise RuntimeError(
+                "SERPAPI_KEY is not set or contains a placeholder. "
+                "Set a valid SERPAPI_KEY in your .env file."
+            )
+
+    def search_leads(self, names: list[str], contexts: list[str] | None = None) -> SearchResult:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if not names:
+            return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+        try:
+            import serpapi as serpapi_mod
+        except ImportError:
+            raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+
+        client = serpapi_mod.Client(api_key=self._api_key)
+        discovered_urls: set[str] = set()
+
+        # Build search queries combining associate names and event contexts
+        raw_queries: list[str] = []
+        valid_contexts = [c for c in (contexts or []) if any(k in c.lower() for k in ["hack", "hazard", "namespace", "build"])]
+        if not valid_contexts and contexts:
+            valid_contexts = contexts[:2]
+
+        for name in names:
+            for ctx in valid_contexts:
+                raw_queries.append(f"site:linkedin.com/posts/ {name} {ctx}")
+            raw_queries.append(f"site:linkedin.com/posts/ {name}")
+
+        queries = list(dict.fromkeys(raw_queries))
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _run_query(q: str) -> list[str]:
+            urls = []
+            try:
+                res = client.search({"engine": "duckduckgo", "q": q})
+                items = res.get("organic_results", [])
+                if not items:
+                    res = client.search({"engine": "google", "q": q})
+                    items = res.get("organic_results", [])
+                for it in items:
+                    link = it.get("link", "")
+                    if "linkedin.com/posts/" in link:
+                        clean_url = link.split("?")[0].rstrip("/")
+                        urls.append(clean_url)
+            except Exception:
+                pass
+            return urls
+
+        with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
+            for url_list in pool.map(_run_query, queries):
+                for u in url_list:
+                    discovered_urls.add(u)
+
+        if not discovered_urls:
+            return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+        # Concurrently fetch og:image from discovered LinkedIn post URLs
+        candidates: list[Candidate] = []
+
+        def _fetch_og(post_url: str) -> Candidate | None:
+            try:
+                headers = {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    )
+                }
+                resp = requests.get(post_url, headers=headers, timeout=self._timeout)
+                if resp.status_code == 200 and resp.text:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    og_img = soup.find("meta", property="og:image")
+                    og_title = soup.find("meta", property="og:title")
+                    if og_img and og_img.get("content"):
+                        title = og_title["content"] if og_title and og_title.get("content") else (soup.title.string if soup.title else "")
+                        return Candidate(
+                            image_url=og_img["content"],
+                            source_url=post_url,
+                            title=title.strip(),
+                            domain="linkedin.com",
+                        )
+            except Exception:
+                pass
+            return None
+
+        with ThreadPoolExecutor(max_workers=min(len(discovered_urls), 8)) as pool:
+            for cand in pool.map(_fetch_og, sorted(discovered_urls)):
+                if cand:
+                    candidates.append(cand)
+
+        return SearchResult(
+            candidates=candidates,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={"queries": queries, "count": len(candidates)},
+        )
+
+    def search(self, image_path: str | Path | None = None) -> SearchResult:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+
+def extract_associate_network_leads(
+    results_dir: str | Path = "data/results",
+) -> tuple[list[str], list[str]]:
+    """
+    Extracts associated names and event/project contexts from verified investigation records.
+    Used for OSINT Associate Network Pivoting when direct visual reverse search yields 0 hits.
+    """
+    results_path = Path(results_dir)
+    if not results_path.exists():
+        return [], []
+
+    collaborators: set[str] = set()
+    other_names: set[str] = set()
+    contexts: set[str] = set()
+
+    STOP_WORDS = {
+        "The World", "New Startup", "Summer Break", "Great Opportunity", "Top Content",
+        "Sign In", "Join Now", "View Profile", "Report Post", "Report Comment",
+        "Open Source", "Social Detective", "Face Search", "Blockchain Verification",
+        "Content Retriever", "Ethereum Sepolia", "Content Verified", "Photo Gallery",
+        "User Profile", "Check Out", "Also Thanks", "Global Hackathon",
+    }
+
+    for p in sorted(results_path.glob("*.json"), reverse=True):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        content_text = " ".join([
+            data.get("content", {}).get("text", ""),
+            data.get("content", {}).get("title", ""),
+            data.get("match", {}).get("title", ""),
+        ])
+
+        # 1. Direct collaborator blocks (highest priority)
+        collab_blocks = re.findall(
+            r"(?:with|teaming up with|team up with|along with)\s+([A-Z][a-z]+ [A-Z][a-z]+(?:(?:,\s*(?:and\s+)?|\s+and\s+)[A-Z][a-z]+ [A-Z][a-z]+)*)",
+            content_text,
+        )
+        for block in collab_blocks:
+            for n in re.findall(r"[A-Z][a-z]+ [A-Z][a-z]+", block):
+                n_clean = n.strip()
+                if n_clean not in STOP_WORDS and len(n_clean) >= 4:
+                    collaborators.add(n_clean)
+
+        pipe_names = re.findall(r"\|\s*([A-Z][a-z]+ [A-Z][a-z]+)", content_text)
+        for n in pipe_names:
+            n_clean = n.strip()
+            if n_clean not in STOP_WORDS and len(n_clean) >= 4:
+                other_names.add(n_clean)
+
+        # 2. Extract key event / campaign contexts
+        for ctx in ["Hackhazards", "Namespace", "Hackhazards 26", "Sarvam AI", "Blinky", "Hacker House"]:
+            if ctx.lower() in content_text.lower():
+                contexts.add(ctx)
+
+    # Collaborators take top priority
+    ordered_names = sorted(collaborators) + [n for n in sorted(other_names) if n not in collaborators]
+    return ordered_names, sorted(contexts)
+
+
+# ---------------------------------------------------------------------------
 # Mock provider — unit tests ONLY
 # ---------------------------------------------------------------------------
 

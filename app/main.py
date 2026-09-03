@@ -361,6 +361,32 @@ def run_pipeline(
         except Exception as e:
             _info(f"Yandex search skipped: {e}")
 
+    # If still no matches above threshold and not targeted, activate Associate Forensics Graph
+    if not matches and not target:
+        _info("Visual reverse search yielded 0 direct hits.")
+        _info("Activating Associate Forensics Graph (Network Pivoting)...")
+        print()
+        from app.search import extract_associate_network_leads, LinkedInPostProvider
+        assoc_names, assoc_contexts = extract_associate_network_leads()
+        if assoc_names:
+            assoc_display = ", ".join(assoc_names[:4]) + (f" (+{len(assoc_names)-4} more)" if len(assoc_names) > 4 else "")
+            _info(f"Correlating with {len(assoc_names)} known network associate(s): {assoc_display}")
+            if assoc_contexts:
+                _info(f"Context tags: {', '.join(assoc_contexts[:3])}")
+            try:
+                li_provider = LinkedInPostProvider(api_key=api_key)
+                li_res = li_provider.search_leads(names=assoc_names, contexts=assoc_contexts)
+                if li_res.candidates:
+                    _ok(f"{len(li_res.candidates)} candidate post(s) discovered from LinkedIn associate sweep")
+                    _info("Analyzing LinkedIn candidate similarity...")
+                    print()
+                    li_matches = matcher.match_and_rank(query_embedding, li_res.candidates)
+                    if li_matches:
+                        all_matches = li_matches
+                        matches = [m for m in all_matches if m.similarity >= threshold]
+            except Exception as e:
+                _info(f"LinkedIn associate sweep skipped: {e}")
+
     # Display top results (show up to 10)
     display_matches = all_matches[:10]
     for i, m in enumerate(display_matches, 1):
