@@ -90,3 +90,39 @@ class TestTargetURLProvider:
         # SVG and icon filtered
         assert not any("icon.svg" in u for u in image_urls)
 
+    @patch("instaloader.Post.from_shortcode")
+    def test_instagram_carousel_extraction(self, mock_from_shortcode):
+        mock_post = MagicMock()
+        mock_post.owner_username = "test_user"
+        mock_post.caption = "Test caption"
+        mock_post.typename = "GraphSidecar"
+
+        node1 = MagicMock()
+        node1.display_url = "https://instagram.com/slide1.jpg"
+        node2 = MagicMock()
+        node2.display_url = "https://instagram.com/slide2.jpg"
+        mock_post.get_sidecar_nodes.return_value = [node1, node2]
+        mock_from_shortcode.return_value = mock_post
+
+        provider = TargetURLProvider("https://www.instagram.com/p/ABC123xyz/?img_index=1")
+        result = provider.search("dummy.jpg")
+
+        assert result.provider == "Instaloader (Instagram)"
+        assert len(result.candidates) == 2
+        assert result.candidates[0].image_url == "https://instagram.com/slide1.jpg"
+        assert result.candidates[1].image_url == "https://instagram.com/slide2.jpg"
+        assert "Slide 1" in result.candidates[0].title
+        assert "Slide 2" in result.candidates[1].title
+
+
+class TestYandexProviderInit:
+    def test_missing_api_key(self):
+        from app.search import YandexProvider
+        with pytest.raises(RuntimeError, match="SERPAPI_KEY"):
+            YandexProvider(api_key="")
+
+    def test_placeholder_api_key(self):
+        from app.search import YandexProvider
+        with pytest.raises(RuntimeError, match="SERPAPI_KEY"):
+            YandexProvider(api_key="your_serpapi_key_here")
+

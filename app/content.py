@@ -107,6 +107,23 @@ class ContentRetriever:
             # Page may be unavailable — we still have the image URL
             pass
 
+        # Special handling for Instagram posts via Instaloader
+        if "instagram.com" in domain and ("/p/" in source_url or "/reel/" in source_url):
+            try:
+                import instaloader
+                import re
+                shortcode_match = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", source_url)
+                if shortcode_match:
+                    shortcode = shortcode_match.group(1)
+                    L = instaloader.Instaloader()
+                    post = instaloader.Post.from_shortcode(L.context, shortcode)
+                    content.author = post.owner_username
+                    content.text = post.caption or content.text
+                    caption_preview = f': "{post.caption[:100]}..."' if post.caption else ""
+                    content.title = f"{post.owner_username} on Instagram{caption_preview}"
+            except Exception:
+                pass
+
         # Download the actual image bytes (for content hashing)
         try:
             img_resp = requests.get(image_url, timeout=self._timeout)

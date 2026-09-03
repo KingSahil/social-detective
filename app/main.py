@@ -86,6 +86,7 @@ def run_pipeline(
     threshold: float = 0.70,
     platform: str | None = None,
     target: str | None = None,
+    engine: str = "all",
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -168,13 +169,17 @@ def run_pipeline(
         _step(2, total_steps, "WEB SEARCH")
 
         from app.config import require_search_config
-        from app.search import SerpAPIProvider
+        from app.search import SerpAPIProvider, YandexProvider
         from app.matcher import FaceMatcher
         import tempfile
         import cv2
 
         api_key = require_search_config()
-        search_provider = SerpAPIProvider(api_key=api_key)
+        if engine == "yandex":
+            search_provider = YandexProvider(api_key=api_key)
+        else:
+            search_provider = SerpAPIProvider(api_key=api_key)
+
         _info(f"Provider: {search_provider.PROVIDER_NAME}")
         _info("Searching...")
 
@@ -267,6 +272,26 @@ def run_pipeline(
                         Path(temp_crop_path).unlink()
                     except OSError:
                         pass
+
+    # If still no matches above threshold and engine allows, try Yandex fallback
+    if not matches and not target and engine in ("all", "yandex"):
+        _info("No candidates above threshold with Google Lens.")
+        _info("Searching Yandex Images (deep social/facial reverse search)...")
+        print()
+        from app.search import YandexProvider
+        try:
+            yandex_provider = YandexProvider(api_key=api_key)
+            yandex_res = yandex_provider.search(str(image_path_obj))
+            if yandex_res.candidates:
+                _ok(f"{len(yandex_res.candidates)} candidates discovered from Yandex Images")
+                _info("Analyzing Yandex candidate similarity...")
+                print()
+                y_matches = matcher.match_and_rank(query_embedding, yandex_res.candidates)
+                if y_matches:
+                    all_matches = y_matches
+                    matches = [m for m in all_matches if m.similarity >= threshold]
+        except Exception as e:
+            _info(f"Yandex search skipped: {e}")
 
     # Display top results (show up to 10)
     display_matches = all_matches[:10]
@@ -483,6 +508,13 @@ def main() -> None:
         default=None,
         help="Optional: direct URL of a specific post or page to verify against the query face (e.g. an X post, Reddit thread, or article).",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["all", "lens", "yandex"],
+        default="all",
+        help="Visual search engine: 'all' (multi-engine cascade), 'lens' (Google Lens), or 'yandex' (Yandex Images). Default: 'all'.",
+    )
 
     # Verify subcommand
     verify_parser = subparsers.add_parser("verify", help="Verify a saved record.")
@@ -501,7 +533,7 @@ def main() -> None:
         sys.exit(0 if result.get("verified") else 1)
 
     elif args.image:
-        run_pipeline(args.image, threshold=args.threshold, platform=args.platform, target=args.target)
+        run_pipeline(args.image, threshold=args.threshold, platform=args.platform, target=args.target, engine=args.engine)
 
     else:
         parser.print_help()

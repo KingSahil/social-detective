@@ -196,27 +196,154 @@ class SerpAPIProvider(SearchProvider):
 
 
 # ---------------------------------------------------------------------------
+# Yandex Images Provider — Deep biometric social media reverse search
+# ---------------------------------------------------------------------------
+
+class YandexProvider(SearchProvider):
+    """
+    Reverse image search using SerpAPI's Yandex Images engine.
+    Yandex performs biometric cross-social-media face matching where Google Lens
+    is restricted.
+    """
+    PROVIDER_NAME = "SerpAPI Yandex Images"
+
+    def __init__(self, api_key: str | None = None, timeout: float = 30.0):
+        self._api_key = api_key
+        self._timeout = timeout
+
+        if not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key:
+            raise RuntimeError(
+                "SERPAPI_KEY is not set or contains a placeholder. "
+                "Set a valid SERPAPI_KEY in your .env file."
+            )
+
+    def _upload_to_public_url(self, image_path: Path) -> str:
+        """
+        Uploads local image to a temporary direct host (freeimage.host) to obtain
+        a public image URL required by SerpAPI's yandex_images engine.
+        """
+        import base64
+        import tempfile
+        import requests
+        from PIL import Image
+
+        temp_jpeg = None
+        try:
+            with Image.open(str(image_path)) as im:
+                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                temp_jpeg = tmp.name
+                tmp.close()
+                im.convert("RGB").save(temp_jpeg, "JPEG", quality=92)
+                with open(temp_jpeg, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+        finally:
+            if temp_jpeg and Path(temp_jpeg).exists():
+                try:
+                    Path(temp_jpeg).unlink()
+                except OSError:
+                    pass
+
+        resp = requests.post("https://freeimage.host/api/1/upload", data={
+            "key": "6d207e02198a847aa98d0a2a901485a5",
+            "action": "upload",
+            "source": b64,
+            "format": "json"
+        }, timeout=self._timeout)
+        resp.raise_for_status()
+        url = resp.json().get("image", {}).get("url")
+        if not url:
+            raise RuntimeError(f"FreeImage upload failed: {resp.text}")
+        return url
+
+    def search(self, image_path: str | Path) -> SearchResult:
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            import serpapi as serpapi_mod
+        except ImportError:
+            raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+
+        client = serpapi_mod.Client(api_key=self._api_key)
+        public_url = self._upload_to_public_url(image_path)
+
+        try:
+            raw = client.search({
+                "engine": "yandex_images",
+                "url": public_url,
+            })
+        except Exception as e:
+            raise RuntimeError(f"SerpAPI Yandex Images search failed: {e}")
+
+        if hasattr(raw, "as_dict"):
+            raw = raw.as_dict()
+        elif not isinstance(raw, dict):
+            raw = dict(raw)
+
+        if "error" in raw:
+            raise RuntimeError(f"SerpAPI Yandex error: {raw['error']}")
+
+        candidates: list[Candidate] = []
+        for item in raw.get("image_results", []):
+            img_url = item.get("thumbnail", "") or item.get("image", "") or item.get("original", "")
+            src_url = item.get("link", "")
+            title = item.get("title", "")
+            domain = item.get("source", "")
+            if img_url:
+                candidates.append(Candidate(
+                    image_url=img_url,
+                    source_url=src_url,
+                    title=title,
+                    domain=domain,
+                ))
+
+        for item in raw.get("similar_images", []):
+            img_url = item.get("thumbnail", "") or item.get("image", "")
+            src_url = item.get("link", "")
+            title = item.get("title", "")
+            domain = item.get("source", "")
+            if img_url and not any(c.image_url == img_url for c in candidates):
+                candidates.append(Candidate(
+                    image_url=img_url,
+                    source_url=src_url,
+                    title=title,
+                    domain=domain,
+                ))
+
+        # Deduplicate by source_url
+        seen: set[str] = set()
+        unique: list[Candidate] = []
+        for c in candidates:
+            if c.source_url not in seen:
+                seen.add(c.source_url)
+                unique.append(c)
+
+        return SearchResult(
+            candidates=unique,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response=raw,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Target URL Provider — Direct social post / webpage inspection
 # ---------------------------------------------------------------------------
 
 class TargetURLProvider(SearchProvider):
     """
-    Directly inspects a specific target URL (e.g., an X/Twitter post, Reddit
-    thread, Instagram link, or webpage) and extracts candidate media images
-    dynamically for face matching and blockchain notarization.
-
-    Zero hardcoding: dynamically parses media CDN links (e.g., pbs.twimg.com),
-    OpenGraph tags, Twitter Card images, JSON-LD schemas, and HTML img elements.
+    Directly extracts media images from a target webpage or social post URL.
+    Used for targeted facial verification against suspected online appearances.
     """
-
     PROVIDER_NAME = "Target URL Inspector"
 
-    def __init__(self, target_url: str, timeout: int = 15):
-        self.target_url = target_url.strip()
+    def __init__(self, target_url: str, timeout: float = 15.0):
+        self.target_url = target_url
         self._timeout = timeout
 
-    def search(self, image_path: str | Path) -> SearchResult:
-        """Extract all candidate media images from the target URL."""
+    def search(self, image_path: str | Path | None = None) -> SearchResult:
         import re
         from urllib.parse import urljoin, urlparse
         import requests
@@ -226,6 +353,45 @@ class TargetURLProvider(SearchProvider):
         domain = urlparse(self.target_url).netloc.lower()
         candidates: list[Candidate] = []
         page_title = ""
+
+        # Special handling: Instagram post via Instaloader
+        if "instagram.com" in domain and ("/p/" in self.target_url or "/reel/" in self.target_url):
+            try:
+                import instaloader
+                shortcode_match = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", self.target_url)
+                if shortcode_match:
+                    shortcode = shortcode_match.group(1)
+                    L = instaloader.Instaloader()
+                    post = instaloader.Post.from_shortcode(L.context, shortcode)
+                    owner = post.owner_username
+                    caption = (post.caption or "").strip()
+                    title = f"{owner} on Instagram: \"{caption[:80]}...\"" if caption else f"Instagram post by {owner}"
+
+                    if post.typename == "GraphSidecar":
+                        for i, node in enumerate(post.get_sidecar_nodes()):
+                            candidates.append(Candidate(
+                                image_url=node.display_url,
+                                source_url=self.target_url,
+                                title=f"{title} (Slide {i+1})",
+                                domain="www.instagram.com",
+                            ))
+                    else:
+                        candidates.append(Candidate(
+                            image_url=post.url,
+                            source_url=self.target_url,
+                            title=title,
+                            domain="www.instagram.com",
+                        ))
+
+                    if candidates:
+                        return SearchResult(
+                            candidates=candidates,
+                            provider="Instaloader (Instagram)",
+                            searched_at=timestamp,
+                            raw_response={"target_url": self.target_url, "image_count": len(candidates), "owner": owner},
+                        )
+            except Exception:
+                pass  # Fall back to HTML scraper if instaloader fails
 
         # Check if the target_url itself is a direct image file
         image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
