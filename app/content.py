@@ -57,7 +57,12 @@ class ContentRetriever:
         # Fetch the source page
         try:
             resp = requests.get(source_url, timeout=self._timeout, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; FaceTrace/1.0)"
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
             })
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -72,12 +77,26 @@ class ContentRetriever:
             if meta_desc and meta_desc.get("content"):
                 content.description = meta_desc["content"]
 
-            # Open Graph text
-            og_desc = soup.find("meta", attrs={"property": "og:description"})
+            # Open Graph / Twitter description
+            og_desc = (
+                soup.find("meta", attrs={"property": "og:description"})
+                or soup.find("meta", attrs={"name": "twitter:description"})
+            )
             if og_desc and og_desc.get("content"):
                 content.text = og_desc["content"]
             elif content.description:
                 content.text = content.description
+
+            # Check JSON-LD for richer text if available
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string or "")
+                    if isinstance(data, dict):
+                        text_val = data.get("articleBody") or data.get("text") or data.get("description")
+                        if text_val and len(str(text_val)) > len(content.text):
+                            content.text = str(text_val)
+                except Exception:
+                    pass
 
         except Exception:
             # Page may be unavailable — we still have the image URL

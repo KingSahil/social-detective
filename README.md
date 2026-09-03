@@ -210,6 +210,18 @@ python -m app.main --image ./data/input/test_face.jpg --platform instagram
 python -m app.main --image ./data/input/test_face.jpg --platform x.com
 ```
 
+### Targeted Social Post / URL Verification (`--target`)
+
+When investigating a suspected appearance on a specific social media post or webpage, use `--target` to dynamically inspect media from that URL:
+
+```bash
+# Verify against an X/Twitter post
+python -m app.main --image ./data/input/test_face_4.png --target https://x.com/supreme__sahil/status/2087906598962524208
+
+# Verify another X/Twitter post
+python -m app.main --image ./data/input/test_face_3.jpg --target https://x.com/Aryannn_6476476/status/2086348435729575971
+```
+
 With custom threshold (default: 0.70):
 ```bash
 python -m app.main --image ./data/input/test_face.jpg --threshold 0.85

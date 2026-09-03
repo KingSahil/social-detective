@@ -135,3 +135,38 @@ class FaceProcessor:
 
         best = max(faces, key=_area)
         return best.embedding
+
+    def get_face_crop(
+        self, image_path: str | Path, margin: float = 0.35
+    ) -> Optional[np.ndarray]:
+        """
+        Detect faces in *image_path* and return a cropped BGR image of the largest face
+        with an added margin/padding (default 35% around the bounding box).
+        Returns None if no face is detected or image cannot be read.
+        """
+        image_path = str(image_path)
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        faces = self._app.get(img)
+        if not faces:
+            return None
+
+        def _area(f):
+            bbox = f.bbox
+            return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+
+        best = max(faces, key=_area)
+        x1, y1, x2, y2 = [int(v) for v in best.bbox]
+        h, w = img.shape[:2]
+
+        pad_w = int((x2 - x1) * margin)
+        pad_h = int((y2 - y1) * margin)
+        cx1 = max(0, x1 - pad_w)
+        cy1 = max(0, y1 - pad_h)
+        cx2 = min(w, x2 + pad_w)
+        cy2 = min(h, y2 + pad_h)
+
+        crop = img[cy1:cy2, cx1:cx2]
+        return crop
+

@@ -81,7 +81,12 @@ def _fatal(msg: str) -> None:
 # Pipeline
 # ---------------------------------------------------------------------------
 
-def run_pipeline(image_path: str, threshold: float = 0.70, platform: str | None = None) -> None:
+def run_pipeline(
+    image_path: str,
+    threshold: float = 0.70,
+    platform: str | None = None,
+    target: str | None = None,
+) -> None:
     """Execute the full FaceTrace pipeline."""
 
     _banner()
@@ -125,47 +130,103 @@ def run_pipeline(image_path: str, threshold: float = 0.70, platform: str | None 
     }
 
     # ==================================================================
-    # [2/7] WEB SEARCH
+    # [2/7] WEB SEARCH / TARGET MEDIA DISCOVERY
     # ==================================================================
-    _step(2, total_steps, "WEB SEARCH")
+    if target:
+        _step(2, total_steps, "TARGET MEDIA DISCOVERY")
+        from app.search import TargetURLProvider
 
-    from app.config import require_search_config
-    from app.search import SerpAPIProvider
+        search_provider = TargetURLProvider(target_url=target)
+        _info(f"Target: {C_CYAN}{target}{C_RESET}")
+        _info("Extracting candidate media images...")
 
-    api_key = require_search_config()
-    search_provider = SerpAPIProvider(api_key=api_key)
-    _info(f"Provider: {search_provider.PROVIDER_NAME}")
-    _info("Searching...")
+        try:
+            search_result = search_provider.search(str(image_path_obj))
+        except Exception as e:
+            _fatal(f"Failed to extract media from target URL: {e}")
 
-    try:
-        search_result = search_provider.search(str(image_path_obj))
-    except Exception as e:
-        _fatal(f"Search failed: {e}")
+        candidate_count = len(search_result.candidates)
+        if candidate_count == 0:
+            _fail("No media images found at target URL")
+            print()
+            sys.exit(1)
 
-    candidate_count = len(search_result.candidates)
-    if candidate_count == 0:
-        _fail("No candidates found")
+        _ok("Target media extracted")
+        _ok(f"{candidate_count} candidate images discovered from target")
         print()
-        print("  The search returned no visual matches.")
-        print("  Try a different image or check your SerpAPI quota.")
+
+        discovered_platforms = [search_result.candidates[0].domain] if search_result.candidates else []
+        record["search"] = {
+            "provider": search_provider.PROVIDER_NAME,
+            "target_url": target,
+            "searched_at": search_result.searched_at,
+            "candidate_count": candidate_count,
+            "platforms": discovered_platforms,
+        }
+
+    else:
+        _step(2, total_steps, "WEB SEARCH")
+
+        from app.config import require_search_config
+        from app.search import SerpAPIProvider
+        import tempfile
+        import cv2
+
+        api_key = require_search_config()
+        search_provider = SerpAPIProvider(api_key=api_key)
+        _info(f"Provider: {search_provider.PROVIDER_NAME}")
+
+        # Auto-crop face to prevent clothing/background from diverting Google Lens into shopping catalogs
+        search_image_path = str(image_path_obj)
+        temp_crop_path = None
+        try:
+            cropped = fp.get_face_crop(image_path_obj, margin=0.35)
+            if cropped is not None:
+                tmp = tempfile.NamedTemporaryFile(suffix="_face_crop.jpg", delete=False)
+                temp_crop_path = tmp.name
+                tmp.close()
+                cv2.imwrite(temp_crop_path, cropped)
+                search_image_path = temp_crop_path
+                _info("Optimized search query: generated portrait face crop")
+        except Exception:
+            pass
+
+        _info("Searching...")
+        try:
+            search_result = search_provider.search(search_image_path)
+        except Exception as e:
+            _fatal(f"Search failed: {e}")
+        finally:
+            if temp_crop_path and Path(temp_crop_path).exists():
+                try:
+                    Path(temp_crop_path).unlink()
+                except OSError:
+                    pass
+
+        candidate_count = len(search_result.candidates)
+        if candidate_count == 0:
+            _fail("No candidates found")
+            print()
+            print("  The search returned no visual matches.")
+            print("  Try a different image or check your SerpAPI quota.")
+            print()
+            sys.exit(1)
+
+        _ok("Search completed")
+        _ok(f"{candidate_count} candidates discovered across the web")
+        
+        # Show platforms discovered across the web
+        discovered_platforms = sorted({c.domain for c in search_result.candidates if c.domain})
+        if discovered_platforms:
+            _info(f"Sources found: {', '.join(discovered_platforms[:7])}" + (f" (+{len(discovered_platforms)-7} more)" if len(discovered_platforms) > 7 else ""))
         print()
-        sys.exit(1)
 
-    _ok("Search completed")
-    _ok(f"{candidate_count} candidates discovered across the web")
-    
-    # Show platforms discovered across the web
-    discovered_platforms = sorted({c.domain for c in search_result.candidates if c.domain})
-    if discovered_platforms:
-        _info(f"Sources found: {', '.join(discovered_platforms[:7])}" + (f" (+{len(discovered_platforms)-7} more)" if len(discovered_platforms) > 7 else ""))
-    print()
-
-    record["search"] = {
-        "provider": search_result.provider,
-        "searched_at": search_result.searched_at,
-        "candidate_count": candidate_count,
-        "platforms": discovered_platforms,
-    }
+        record["search"] = {
+            "provider": search_result.provider,
+            "searched_at": search_result.searched_at,
+            "candidate_count": candidate_count,
+            "platforms": discovered_platforms,
+        }
 
     # ==================================================================
     # [3/7] FACE MATCHING
@@ -191,21 +252,24 @@ def run_pipeline(image_path: str, threshold: float = 0.70, platform: str | None 
         _info(f"Filtering to platform '{platform}': {len(search_candidates)} candidates")
 
     matcher = FaceMatcher(fp)
-    matches = matcher.match_candidates(
-        query_embedding, search_candidates, threshold=threshold
-    )
+    all_matches = matcher.match_and_rank(query_embedding, search_candidates)
+    matches = [m for m in all_matches if m.similarity >= threshold]
 
     # Display top results (show up to 10)
-    display_matches = matches[:10]
+    display_matches = all_matches[:10]
     for i, m in enumerate(display_matches, 1):
         pct = m.similarity * 100
-        color = C_GREEN if m.similarity >= 0.85 else (C_YELLOW if m.similarity >= 0.70 else C_RED)
+        color = C_GREEN if m.similarity >= 0.85 else (C_YELLOW if m.similarity >= threshold else C_RED)
         platform_label = m.candidate.domain or m.candidate.title[:30] or "Web"
-        print(f"        #{i:<3} {color}Similarity: {pct:.1f}%{C_RESET}  [{platform_label}]")
+        status_tag = "" if m.face_detected else " (no face detected)"
+        print(f"        #{i:<3} {color}Similarity: {pct:.1f}%{C_RESET}  [{platform_label}]{status_tag}")
 
     if not matches:
-        _fail(f"No candidates above threshold ({threshold:.0%})")
         print()
+        _fail(f"No candidates above threshold ({threshold:.0%})")
+        if all_matches and all_matches[0].similarity > 0:
+            top_sim = all_matches[0].similarity * 100
+            print(f"  Highest candidate similarity was {top_sim:.1f}%")
         print("  Try lowering the threshold with --threshold 0.50")
         print()
         sys.exit(1)
@@ -400,6 +464,12 @@ def main() -> None:
         default=None,
         help="Optional: filter candidates to a specific platform (e.g. instagram, wikipedia, x.com).",
     )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="Optional: direct URL of a specific post or page to verify against the query face (e.g. an X post, Reddit thread, or article).",
+    )
 
     # Verify subcommand
     verify_parser = subparsers.add_parser("verify", help="Verify a saved record.")
@@ -418,7 +488,7 @@ def main() -> None:
         sys.exit(0 if result.get("verified") else 1)
 
     elif args.image:
-        run_pipeline(args.image, threshold=args.threshold, platform=args.platform)
+        run_pipeline(args.image, threshold=args.threshold, platform=args.platform, target=args.target)
 
     else:
         parser.print_help()

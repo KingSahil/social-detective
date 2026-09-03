@@ -47,16 +47,14 @@ class FaceMatcher:
         self._fp = face_processor
         self._timeout = timeout
 
-    def match_candidates(
+    def match_and_rank(
         self,
         query_embedding: np.ndarray,
         candidates: list[Candidate],
-        threshold: float = 0.70,
     ) -> list[MatchResult]:
         """
         For each candidate, download the image, extract a face embedding,
-        and compute similarity.  Returns results sorted by similarity (desc),
-        filtered by *threshold*.
+        and compute cosine similarity. Returns all results sorted by similarity (descending).
         """
         results: list[MatchResult] = []
 
@@ -67,11 +65,22 @@ class FaceMatcher:
 
         # Sort by similarity descending
         results.sort(key=lambda r: r.similarity, reverse=True)
-
-        # Filter by threshold
-        results = [r for r in results if r.similarity >= threshold]
-
         return results
+
+    def match_candidates(
+        self,
+        query_embedding: np.ndarray,
+        candidates: list[Candidate],
+        threshold: float = 0.70,
+    ) -> list[MatchResult]:
+        """
+        For each candidate, download the image, extract a face embedding,
+        and compute similarity. Returns results sorted by similarity (desc),
+        filtered by *threshold*.
+        """
+        results = self.match_and_rank(query_embedding, candidates)
+        return [r for r in results if r.similarity >= threshold]
+
 
     def _process_candidate(
         self, query_embedding: np.ndarray, candidate: Candidate

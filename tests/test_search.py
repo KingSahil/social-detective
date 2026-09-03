@@ -8,7 +8,9 @@ from app.search import (
     SearchResult,
     MockSearchProvider,
     SerpAPIProvider,
+    TargetURLProvider,
 )
+from unittest.mock import patch, MagicMock
 
 
 class TestCandidate:
@@ -48,3 +50,43 @@ class TestSerpAPIProviderInit:
     def test_placeholder_api_key(self):
         with pytest.raises(RuntimeError, match="SERPAPI_KEY"):
             SerpAPIProvider(api_key="your_serpapi_key_here")
+
+
+class TestTargetURLProvider:
+    def test_direct_image_url(self):
+        provider = TargetURLProvider("https://example.com/avatar.jpg")
+        result = provider.search("dummy.jpg")
+        assert len(result.candidates) == 1
+        assert result.candidates[0].image_url == "https://example.com/avatar.jpg"
+        assert result.candidates[0].domain == "example.com"
+
+    @patch("requests.get")
+    def test_extract_social_media(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.text = """
+        <html>
+        <head>
+            <title>Test Post on X</title>
+            <meta property="og:image" content="https://example.com/og_preview.jpg" />
+        </head>
+        <body>
+            <img src="https://pbs.twimg.com/media/HPQytT_bUAA24UV.jpg" />
+            <img src="https://example.com/photo2.png" />
+            <img src="https://example.com/icon.svg" />
+        </body>
+        </html>
+        """
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        provider = TargetURLProvider("https://x.com/user/status/12345")
+        result = provider.search("dummy.jpg")
+
+        assert result.provider == "Target URL Inspector"
+        image_urls = [c.image_url for c in result.candidates]
+        assert "https://pbs.twimg.com/media/HPQytT_bUAA24UV.jpg" in image_urls
+        assert "https://example.com/og_preview.jpg" in image_urls
+        assert "https://example.com/photo2.png" in image_urls
+        # SVG and icon filtered
+        assert not any("icon.svg" in u for u in image_urls)
+

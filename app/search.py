@@ -175,6 +175,131 @@ class SerpAPIProvider(SearchProvider):
 
 
 # ---------------------------------------------------------------------------
+# Target URL Provider — Direct social post / webpage inspection
+# ---------------------------------------------------------------------------
+
+class TargetURLProvider(SearchProvider):
+    """
+    Directly inspects a specific target URL (e.g., an X/Twitter post, Reddit
+    thread, Instagram link, or webpage) and extracts candidate media images
+    dynamically for face matching and blockchain notarization.
+
+    Zero hardcoding: dynamically parses media CDN links (e.g., pbs.twimg.com),
+    OpenGraph tags, Twitter Card images, JSON-LD schemas, and HTML img elements.
+    """
+
+    PROVIDER_NAME = "Target URL Inspector"
+
+    def __init__(self, target_url: str, timeout: int = 15):
+        self.target_url = target_url.strip()
+        self._timeout = timeout
+
+    def search(self, image_path: str | Path) -> SearchResult:
+        """Extract all candidate media images from the target URL."""
+        import re
+        from urllib.parse import urljoin, urlparse
+        import requests
+        from bs4 import BeautifulSoup
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        domain = urlparse(self.target_url).netloc.lower()
+        candidates: list[Candidate] = []
+        page_title = ""
+
+        # Check if the target_url itself is a direct image file
+        image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+        parsed_path = urlparse(self.target_url).path.lower()
+        if any(parsed_path.endswith(ext) for ext in image_extensions):
+            candidates.append(Candidate(
+                image_url=self.target_url,
+                source_url=self.target_url,
+                title=f"Direct Image ({Path(parsed_path).name})",
+                domain=domain,
+            ))
+            return SearchResult(
+                candidates=candidates,
+                provider=self.PROVIDER_NAME,
+                searched_at=timestamp,
+                raw_response={"target_url": self.target_url, "image_count": 1},
+            )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        resp = requests.get(self.target_url, headers=headers, timeout=self._timeout)
+        resp.raise_for_status()
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Extract page title
+        title_tag = soup.find("title")
+        if title_tag and title_tag.string:
+            page_title = title_tag.string.strip()
+        elif soup.find("meta", property="og:title"):
+            page_title = soup.find("meta", property="og:title").get("content", "").strip()
+
+        discovered_image_urls: set[str] = set()
+
+        # 1. Look for Twitter/X media links (pbs.twimg.com/media/...)
+        twimg_matches = re.findall(
+            r"https://pbs\.twimg\.com/media/([A-Za-z0-9_-]+)(?:\.[a-zA-Z0-9]+|\?format=[a-zA-Z0-9]+)?",
+            html
+        )
+        for media_id in twimg_matches:
+            # Normalize to direct high-res JPG URL
+            discovered_image_urls.add(f"https://pbs.twimg.com/media/{media_id}.jpg")
+
+        # 2. Look for Twitter profile images if available
+        profile_matches = re.findall(
+            r"https://pbs\.twimg\.com/profile_images/([A-Za-z0-9_/-]+?)(?:_normal|_400x400)?\.(?:jpg|png|jpeg)",
+            html
+        )
+        for p_id in profile_matches:
+            discovered_image_urls.add(f"https://pbs.twimg.com/profile_images/{p_id}_400x400.jpg")
+
+        # 3. OpenGraph and Twitter Card meta tags
+        for meta_prop in ["og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
+            meta_tag = soup.find("meta", attrs={"property": meta_prop}) or soup.find("meta", attrs={"name": meta_prop})
+            if meta_tag and meta_tag.get("content"):
+                u = meta_tag["content"].strip()
+                if u.startswith("http"):
+                    discovered_image_urls.add(u)
+
+        # 4. Standard HTML <img> tags
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src")
+            if src:
+                full_url = urljoin(self.target_url, src)
+                # Filter out small tracking pixels / data URIs / svgs
+                if (
+                    full_url.startswith("http")
+                    and not any(x in full_url.lower() for x in ["favicon", "icon", "analytics", "tracking", ".svg"])
+                ):
+                    discovered_image_urls.add(full_url)
+
+        for img_url in discovered_image_urls:
+            candidates.append(Candidate(
+                image_url=img_url,
+                source_url=self.target_url,
+                title=page_title,
+                domain=domain,
+            ))
+
+        return SearchResult(
+            candidates=candidates,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={"target_url": self.target_url, "image_count": len(candidates)},
+        )
+
+
+# ---------------------------------------------------------------------------
 # Mock provider — unit tests ONLY
 # ---------------------------------------------------------------------------
 
