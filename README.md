@@ -14,47 +14,151 @@ Blockchain record → Verification
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    %% ─────────────────────────────────────────────────────────────
+    %% STYLING DEFINITIONS
+    %% ─────────────────────────────────────────────────────────────
+    classDef default fill:#1f2937,stroke:#475569,color:#f8fafc,stroke-width:1.5px
+    classDef inputNode fill:#0f172a,stroke:#38bdf8,color:#f8fafc,stroke-width:2px
+    classDef aiNode fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff,stroke-width:2px
+    classDef searchNode fill:#064e3b,stroke:#34d399,color:#ecfdf5,stroke-width:2px
+    classDef matchNode fill:#3b0764,stroke:#a855f7,color:#faf5ff,stroke-width:2px
+    classDef cryptoNode fill:#701a75,stroke:#f472b6,color:#fdf2f8,stroke-width:2px
+    classDef chainNode fill:#431407,stroke:#fb923c,color:#fff7ed,stroke-width:2px
+    classDef verifyNode fill:#082f49,stroke:#38bdf8,color:#f0f9ff,stroke-width:2px
+    classDef verifiedNode fill:#14532d,stroke:#22c55e,color:#f0fdf4,stroke-width:2.5px
+    classDef tamperedNode fill:#7f1d1d,stroke:#ef4444,color:#fef2f2,stroke-width:2.5px
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 1: BIOMETRIC INGESTION & FEATURE EXTRACTION
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P1 ["Phase 1: Biometric Intake & Face Feature Extraction"]
+        IN(["Query Face Image<br/>e.g. test_face.jpg"]):::inputNode
+        CLI["CLI Options & Parameters<br/>--threshold, --platform, --target, --engine, --handle"]:::inputNode
+        DET["InsightFace Detector<br/>buffalo_l Model (5-point Landmark Alignment)"]:::aiNode
+        EMB["ArcFace Embedding Engine<br/>512-Dimensional Normalized Vector"]:::aiNode
+        CROP["Portrait Face Cropper<br/>Tight Bounding Box + 35% Margin (Fallback)"]:::aiNode
+
+        IN --> DET
+        CLI -.->|"Configure thresholds & paths"| DET
+        DET --> EMB
+        DET --> CROP
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 2: SEARCH CASCADE & OSINT DISCOVERY
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P2 ["Phase 2: Multi-Engine Search Cascade & OSINT Discovery"]
+        ROUTER{"Execution Mode<br/>Targeted vs Cascade"}:::searchNode
+
+        T_URL["Target URL Extractor<br/>Instagram Carousels, X/Twitter, Reddit, Web"]:::searchNode
+        T_USER["Twitter Timeline Provider<br/>Direct Profile Media Tweet Extraction"]:::searchNode
+
+        LENS["Primary: Google Lens Visual Search<br/>SerpAPI Reverse Image Discovery"]:::searchNode
+        LENS_CROP["Fallback 1: Cropped Face Search<br/>Focused Facial Geometry Query"]:::searchNode
+        YANDEX["Fallback 2: Yandex Images<br/>Deep Biometric Facial Search"]:::searchNode
+        PIVOT["OSINT Identity & Network Pivoting<br/>Social Handles & Associate Graph Sweep"]:::searchNode
+
+        MEDIA_POOL[("Candidate Media Pool<br/>Post URLs, Image URLs, Platform Metadata")]:::searchNode
+
+        EMB --> ROUTER
+        ROUTER -->|"--target URL"| T_URL
+        ROUTER -->|"--handle user"| T_USER
+        ROUTER -->|"Default: --engine all"| LENS
+
+        LENS -->|"No match above threshold"| LENS_CROP
+        LENS_CROP -->|"Still below threshold"| YANDEX
+        LENS -.->|"Discovered Handles"| PIVOT
+        YANDEX -.->|"Associate Leads"| PIVOT
+
+        T_URL --> MEDIA_POOL
+        T_USER --> MEDIA_POOL
+        LENS --> MEDIA_POOL
+        LENS_CROP --> MEDIA_POOL
+        YANDEX --> MEDIA_POOL
+        PIVOT --> MEDIA_POOL
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 3: CANDIDATE MATCHING & RANKING
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P3 ["Phase 3: Biometric Verification & Candidate Ranking"]
+        CAND_EMB["Candidate Face Processor<br/>Extract 512-d ArcFace Vector per Candidate"]:::aiNode
+        MATCHER["FaceMatcher Engine<br/>Cosine Similarity = dot(q, c) / (||q|| * ||c||)"]:::matchNode
+        FILTER["Ranking & Threshold Filter<br/>Platform Filtering & Score Meets Threshold"]:::matchNode
+        WINNER(["Rank #1 Strongest Match Selected<br/>Highest Facial Similarity Score"]):::matchNode
+
+        MEDIA_POOL --> CAND_EMB
+        EMB -.->|"Query Vector (512-d)"| MATCHER
+        CAND_EMB --> MATCHER
+        MATCHER --> FILTER
+        FILTER --> WINNER
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 4: FORENSIC ACQUISITION & CANONICALIZATION
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P4 ["Phase 4: Forensic Content Acquisition & Canonical Packaging"]
+        ACQUIRE["Content Retriever<br/>Fetch Post HTML, Text, Author, Timestamp"]:::cryptoNode
+        IMG_DOWNLOAD["Media Ingestion<br/>Download Raw Image Bytes"]:::cryptoNode
+        IMG_HASH["Image Cryptographic Hash<br/>Compute SHA-256 of Raw Image Bytes"]:::cryptoNode
+        CANON["Forensic Canonicalizer<br/>Deterministic Sorted JSON Key-Value Map"]:::cryptoNode
+
+        WINNER --> ACQUIRE
+        WINNER --> IMG_DOWNLOAD
+        IMG_DOWNLOAD --> IMG_HASH
+        ACQUIRE --> CANON
+        IMG_HASH --> CANON
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 5: CRYPTOGRAPHIC SEAL & BLOCKCHAIN NOTARIZATION
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P5 ["Phase 5: Cryptographic Sealing & Blockchain Notarization"]
+        SHA["SHA-256 Fingerprint Generator<br/>Produces Unique 32-Byte Content Hash"]:::cryptoNode
+        WEB3["Web3.py Client<br/>Sign & Submit Transaction to Ethereum Sepolia"]:::chainNode
+        CONTRACT[("ContentRegistry.sol Smart Contract<br/>Address: 0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21<br/>Ethereum Sepolia Testnet")]:::chainNode
+        DOSSIER[("Local Forensic Dossier<br/>Saved to data/results/*_record.json")]:::chainNode
+
+        CANON --> SHA
+        SHA -->|"bytes32 contentHash"| WEB3
+        WEB3 -->|"registerContent(hash, sourceId)"| CONTRACT
+        CONTRACT -.->|"Tx Hash & Block Confirmation"| DOSSIER
+    end
+
+    %% ─────────────────────────────────────────────────────────────
+    %% PHASE 6: INDEPENDENT VERIFICATION & TAMPER DETECTION
+    %% ─────────────────────────────────────────────────────────────
+    subgraph P6 ["Phase 6: Independent Verification & Tamper Detection"]
+        V_CLI["facetrace verify --record record.json<br/>CLI Verification Tool"]:::verifyNode
+        V_LOCAL["Recompute Canonical SHA-256 Hash<br/>From Local Record Fields"]:::verifyNode
+        V_QUERY["Query Smart Contract<br/>Check ContentRegistry.records(hash)"]:::verifyNode
+        V_CHECK{"Integrity Check:<br/>Local Hash == On-Chain Hash?"}:::verifyNode
+
+        V_PASS(["✓ CONTENT VERIFIED<br/>Proof Intact: 100% Authentic & Untampered"]):::verifiedNode
+        V_FAIL(["✗ TAMPER DETECTED<br/>Hash Mismatch: Text, Image, or Meta Altered"]):::tamperedNode
+
+        DOSSIER -.->|"Audit Target"| V_CLI
+        V_CLI --> V_LOCAL
+        V_CLI --> V_QUERY
+        V_LOCAL --> V_CHECK
+        V_QUERY --> V_CHECK
+        V_CHECK -->|"Identical Hash Found On-Chain"| V_PASS
+        V_CHECK -->|"Hash Differs or Not Registered"| V_FAIL
+    end
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│ Input Image │────▶│ InsightFace  │────▶│ 512-d Embedding │
-└─────────────┘     │  (ArcFace)   │     └────────┬────────┘
-                    └──────────────┘              │
-                                                  ▼
-                    ┌────────────────────────┐    │
-                    │ Search Engine Cascade  │    │
-                    │ • Google Lens (SerpAPI)│◀───┤
-                    │ • Yandex Images        │    │
-                    │ • Instaloader (Target) │    │
-                    └───────────┬────────────┘    │
-                                │                 │
-                                ▼                 │
-                    ┌────────────────────────┐    │
-                    │ Discovered Media URLs  │    │
-                    └───────────┬────────────┘    │
-                                │                 │
-                                ▼                 │
-                    ┌──────────────┐              │
-                    │ Face Matcher │◀─────────────┘
-                    │ (Cosine Sim) │
-                    └───────┬──────┘
-                            │
-                            ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │ Content      │────▶│ Canonical JSON  │
-                    │ Retriever    │     │ + Image Bytes   │
-                    └───────┬──────┘     └────────┬────────┘
-                            │                     │
-                            ▼                     ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │ Ethereum     │◀────│ SHA-256 Content │
-                    │ Sepolia      │     │ Fingerprint     │
-                    └───────┬──────┘     └─────────────────┘
-                            │
-                            ▼
-                    ┌──────────────┐
-                    │ Verifier     │────▶ ✓ VERIFIED
-                    └──────────────┘
-```
+
+### Pipeline Overview
+
+| Phase | Stage | Engine / Technology | Description |
+|---|---|---|---|
+| **1** | **Biometric Intake** | InsightFace & ArcFace (`buffalo_l`) | Detects face landmarks, generates 512-d normalized embedding vector & tight portrait crops. |
+| **2** | **Search Cascade & OSINT** | Google Lens, Yandex & Scrapers | Multi-engine cascade (Lens → Crop → Yandex) plus targeted scraping (`--target`, `--handle`) & associate pivoting. |
+| **3** | **Biometric Verification** | Cosine Similarity Ranking | Computes cosine similarity between query and candidate face vectors; filters and ranks matches. |
+| **4** | **Forensic Acquisition** | ContentRetriever & SHA-256 | Extracts public post metadata, downloads raw image bytes, and formats deterministic canonical JSON. |
+| **5** | **Blockchain Notarization** | Web3.py & Solidity 0.8.19 | Submits immutable 32-byte content hash to `ContentRegistry.sol` on Ethereum Sepolia testnet. |
+| **6** | **Integrity Verification** | Local Re-Hash vs Sepolia Contract | Recalculates local hash and queries on-chain state to confirm data authenticity or detect tampering. |
 
 ---
 
