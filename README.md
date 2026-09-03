@@ -16,39 +16,44 @@ Blockchain record → Verification
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Input Image │────▶│  InsightFace  │────▶│  512-d Embedding │
+│ Input Image │────▶│ InsightFace  │────▶│ 512-d Embedding │
 └─────────────┘     │  (ArcFace)   │     └────────┬────────┘
                     └──────────────┘              │
                                                   ▼
+                    ┌────────────────────────┐    │
+                    │ Search Engine Cascade  │    │
+                    │ • Google Lens (SerpAPI)│◀───┤
+                    │ • Yandex Images        │    │
+                    │ • Instaloader (Target) │    │
+                    └───────────┬────────────┘    │
+                                │                 │
+                                ▼                 │
+                    ┌────────────────────────┐    │
+                    │ Discovered Media URLs  │    │
+                    └───────────┬────────────┘    │
+                                │                 │
+                                ▼                 │
+                    ┌──────────────┐              │
+                    │ Face Matcher │◀─────────────┘
+                    │ (Cosine Sim) │
+                    └───────┬──────┘
+                            │
+                            ▼
                     ┌──────────────┐     ┌─────────────────┐
-                    │  SerpAPI     │────▶│  Candidate URLs  │
-                    │  Google Lens │     └────────┬────────┘
-                    └──────────────┘              │
-                                                  ▼
+                    │ Content      │────▶│ Canonical JSON  │
+                    │ Retriever    │     │ + Image Bytes   │
+                    └───────┬──────┘     └────────┬────────┘
+                            │                     │
+                            ▼                     ▼
                     ┌──────────────┐     ┌─────────────────┐
-                    │  Face Matcher │────▶│  Ranked Results  │
-                    │  (Cosine Sim)│     └────────┬────────┘
-                    └──────────────┘              │
-                                                  ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │  Content     │────▶│  Canonical JSON  │
-                    │  Retriever   │     │  + Image Bytes   │
-                    └──────────────┘     └────────┬────────┘
-                                                  │
-                                                  ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │  SHA-256     │────▶│  Content Hash    │
-                    └──────────────┘     └────────┬────────┘
-                                                  │
-                                                  ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │  Ethereum    │────▶│  On-chain Record │
-                    │  Sepolia     │     └────────┬────────┘
-                    └──────────────┘              │
-                                                  ▼
-                    ┌──────────────┐     ┌─────────────────┐
-                    │  Verifier    │────▶│  ✓ VERIFIED      │
-                    └──────────────┘     └─────────────────┘
+                    │ Ethereum     │◀────│ SHA-256 Content │
+                    │ Sepolia      │     │ Fingerprint     │
+                    └───────┬──────┘     └─────────────────┘
+                            │
+                            ▼
+                    ┌──────────────┐
+                    │ Verifier     │────▶ ✓ VERIFIED
+                    └──────────────┘
 ```
 
 ---
@@ -56,12 +61,14 @@ Blockchain record → Verification
 ## Features
 
 - **Face Detection & Encoding** — InsightFace with ArcFace (`buffalo_l` model, 512-d embeddings)
-- **Genuine Web Search** — SerpAPI Google Lens reverse-image search at runtime (no hardcoded results)
-- **Face Similarity Matching** — Cosine similarity ranking with configurable threshold
-- **Content Fingerprinting** — SHA-256 hash of canonical content + actual image bytes
+- **Multi-Engine Visual Search** — SerpAPI Google Lens + Yandex Images reverse search cascade
+- **Deep Social Discovery** — Instaloader integration for Instagram carousels (`GraphSidecar`), author metadata, and captions
+- **Targeted Post Inspection (`--target`)** — Dynamically parses candidate media from Twitter/X, Instagram, LinkedIn, and web posts
+- **Face Similarity Matching** — ArcFace cosine similarity ranking with configurable threshold
+- **Content Fingerprinting** — SHA-256 hash of canonical content + raw image bytes
 - **Blockchain Recording** — Ethereum Sepolia smart contract for tamper-evident storage
 - **Integrity Verification** — Compare local content hash against on-chain record
-- **Tamper Detection** — Modify any field and verification catches it
+- **Tamper Detection** — Modify any field or image byte and verification catches it
 
 ---
 
@@ -81,13 +88,13 @@ Blockchain record → Verification
    </p>
 
 2. **Open Web Search (*The detective search*)**:
-   The query photo is uploaded to Google Lens via SerpAPI to conduct a **live, runtime reverse-image search** across dozens of platforms including **Reddit, Instagram, X/Twitter, Facebook, and Wikipedia**.
+   The query photo is searched across Google Lens and Yandex Images via SerpAPI to conduct a **live, runtime reverse-image search** across dozens of platforms including **Reddit, Instagram, X/Twitter, Facebook, and Wikipedia**.
 
 3. **Digital Lineup (*Face similarity ranking*)**:
-   The application downloads candidate images found online and runs facial recognition on each one, computing a mathematical similarity score (e.g., *96.8% match*). The candidate with the strongest face similarity is selected.
+   The application downloads candidate images found online and runs facial recognition on each one, computing a mathematical similarity score (e.g., *97.4% match*). The candidate with the strongest face similarity is selected.
 
 4. **Evidence Collection (*Capturing the post*)**:
-   Public metadata from the winning post is extracted: source URL, page title, text, domain, and the raw image bytes.
+   Public metadata from the winning post is extracted: source URL, page title, author handle, text/captions, domain, and the raw image bytes.
 
 5. **Digital Wax Seal (*SHA-256 fingerprinting*)**:
    The post metadata and raw image bytes are packaged into a deterministic canonical structure and hashed using SHA-256. If even a single word in the post or a single pixel in the image is changed later, this fingerprint changes completely.
@@ -109,7 +116,8 @@ Blockchain record → Verification
 |-----------|-----------|
 | Face Detection | InsightFace / ArcFace (buffalo_l) |
 | Face Embeddings | 512-d ArcFace via ONNX Runtime |
-| Web Search | SerpAPI Google Lens |
+| Web Search Engines | SerpAPI Google Lens & Yandex Images |
+| Social Scrapers | Instaloader (Instagram) & BeautifulSoup4 |
 | Content Hashing | SHA-256 (hashlib) |
 | Blockchain | Ethereum Sepolia + Solidity 0.8.19 |
 | Smart Contract | Web3.py + py-solc-x |
@@ -195,6 +203,21 @@ python scripts/deploy_contract.py
 python -m app.main --image ./data/input/test_face.jpg
 ```
 
+### Visual Search Engine Selection (`--engine`)
+
+Choose between Google Lens, Yandex Images, or the automatic multi-engine cascade:
+
+```bash
+# Multi-engine cascade (default): Google Lens -> Portrait Crop -> Yandex Images
+python -m app.main --image ./data/input/test_face.jpg --engine all
+
+# Force Google Lens only
+python -m app.main --image ./data/input/test_face.jpg --engine lens
+
+# Force Yandex Images only (deep biometric facial/social search)
+python -m app.main --image ./data/input/test_face.jpg --engine yandex
+```
+
 ### Target a Specific Platform (Optional)
 
 You can filter candidate results to a specific social/web platform:
@@ -212,13 +235,16 @@ python -m app.main --image ./data/input/test_face.jpg --platform x.com
 
 ### Targeted Social Post / URL Verification (`--target`)
 
-When investigating a suspected appearance on a specific social media post or webpage, use `--target` to dynamically inspect media from that URL:
+When investigating a suspected appearance on a specific social media post, reel, or webpage, use `--target` to dynamically extract media from that URL and verify biometric identity without hardcoding:
 
 ```bash
+# Verify against an Instagram Carousel Post (extracts all slides dynamically)
+python -m app.main --image ./data/input/test_face_7.jpg --target https://www.instagram.com/p/DNQM2qFvvTv/?img_index=1
+
 # Verify against an X/Twitter post
 python -m app.main --image ./data/input/test_face_4.png --target https://x.com/supreme__sahil/status/2087906598962524208
 
-# Verify another X/Twitter post
+# Verify against another X/Twitter post
 python -m app.main --image ./data/input/test_face_3.jpg --target https://x.com/Aryannn_6476476/status/2086348435729575971
 ```
 
