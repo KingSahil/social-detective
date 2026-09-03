@@ -10,11 +10,18 @@ Provides:
 from __future__ import annotations
 
 import abc
+import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urljoin
+
+import numpy as np
+import requests
+from bs4 import BeautifulSoup
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +546,259 @@ class TargetURLProvider(SearchProvider):
             searched_at=timestamp,
             raw_response={"target_url": self.target_url, "image_count": len(candidates)},
         )
+
+
+# ---------------------------------------------------------------------------
+# Twitter/X Public Profile Timeline Provider (OSINT Pivot)
+# ---------------------------------------------------------------------------
+
+class TwitterProfileProvider(SearchProvider):
+    """
+    Sweeps a Twitter/X public user profile timeline via SSR HTML.
+    Extracts all tweet status URLs and their high-res attached media
+    without requiring an official Twitter API key or user authentication.
+    """
+
+    PROVIDER_NAME = "Twitter / X Profile Discovery"
+
+    def __init__(self, handle: str, timeout: float = 6.0):
+        self.handle = handle.lstrip("@").strip()
+        self.timeout = timeout
+
+    def search(self, image_path: str | Path | None = None) -> SearchResult:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if not self.handle:
+            return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        url = f"https://x.com/{self.handle}"
+        candidates: list[Candidate] = []
+        seen_status: set[str] = set()
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+            if resp.status_code == 200 and resp.text:
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # Twitter embeds links to tweets: /<handle>/status/<id>/photo/1 with an <img> tag inside
+                for a in soup.find_all("a"):
+                    href = a.get("href", "")
+                    if "/status/" in href:
+                        img = a.find("img")
+                        if img and img.get("src"):
+                            img_src = img["src"]
+                            status_id = href.split("/status/")[1].split("/")[0].split("?")[0]
+                            full_tweet_url = f"https://x.com/{self.handle}/status/{status_id}"
+
+                            if full_tweet_url not in seen_status:
+                                seen_status.add(full_tweet_url)
+                                candidates.append(Candidate(
+                                    image_url=img_src,
+                                    source_url=full_tweet_url,
+                                    title=f"Tweet by @{self.handle}",
+                                    domain="x.com"
+                                ))
+        except Exception:
+            pass
+
+        # Fallback: query FxTwitter API for high-res avatar if direct scrape returned 0 items
+        if not candidates:
+            try:
+                r_fx = requests.get(f"https://api.fxtwitter.com/{self.handle}", timeout=min(4.0, self.timeout))
+                if r_fx.status_code == 200:
+                    data = r_fx.json()
+                    user = data.get("user", {})
+                    avatar = user.get("avatar_url")
+                    if avatar:
+                        profile_url = f"https://x.com/{self.handle}"
+                        if profile_url not in seen_status:
+                            candidates.append(Candidate(
+                                image_url=avatar.replace("_normal", "_400x400"),
+                                source_url=profile_url,
+                                title=f"Profile of @{self.handle} ({user.get('name', '')})",
+                                domain="x.com"
+                            ))
+            except Exception:
+                pass
+
+        return SearchResult(
+            candidates=candidates,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={"handle": self.handle, "count": len(candidates)},
+        )
+
+
+def extract_social_handles(candidates: list[Candidate]) -> list[str]:
+    """
+    Extracts potential social usernames/handles from candidate URLs and titles.
+    Supports LinkedIn, Instagram, GitHub, Twitter/X, and direct handle formats.
+    """
+    handles: set[str] = set()
+    RESERVED = {
+        "posts", "reel", "reels", "p", "share", "explore", "home", "status",
+        "about", "login", "signup", "search", "hashtag", "direct", "stories",
+        "in", "pub", "feed", "jobs", "learning", "events", "company", "groups",
+        "intent", "i", "privacy", "tos", "help", "settings"
+    }
+
+    for c in candidates:
+        urls = [c.source_url or "", c.image_url or ""]
+        for u in urls:
+            if not u:
+                continue
+            # LinkedIn /in/<handle> or /posts/<handle>_...
+            m_li_in = re.search(r"linkedin\.com/in/([A-Za-z0-9_-]+)", u, re.IGNORECASE)
+            if m_li_in:
+                h = m_li_in.group(1).lower().strip()
+                if h and h not in RESERVED and len(h) >= 3:
+                    handles.add(h)
+            m_li_post = re.search(r"linkedin\.com/posts/([A-Za-z0-9_-]+)_", u, re.IGNORECASE)
+            if m_li_post:
+                h = m_li_post.group(1).lower().strip()
+                if h and h not in RESERVED and len(h) >= 3:
+                    handles.add(h)
+
+            # Instagram /<handle> or /p/...
+            m_ig = re.search(r"instagram\.com/([A-Za-z0-9_.-]+)", u, re.IGNORECASE)
+            if m_ig:
+                h = m_ig.group(1).lower().strip().rstrip("/")
+                if h and h not in RESERVED and len(h) >= 3:
+                    handles.add(h)
+
+            # GitHub /<handle>
+            m_gh = re.search(r"github\.com/([A-Za-z0-9_-]+)", u, re.IGNORECASE)
+            if m_gh:
+                h = m_gh.group(1).lower().strip().rstrip("/")
+                if h and h not in RESERVED and len(h) >= 3:
+                    handles.add(h)
+
+            # X / Twitter /<handle>
+            m_x = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]+)", u, re.IGNORECASE)
+            if m_x:
+                h = m_x.group(1).lower().strip()
+                if h and h not in RESERVED and len(h) >= 3:
+                    handles.add(h)
+
+        # Also look in candidate title for @handle
+        title = c.title or ""
+        for word in title.split():
+            if word.startswith("@") and len(word) > 2:
+                clean_h = re.sub(r"[^A-Za-z0-9_]", "", word).lower()
+                if clean_h and clean_h not in RESERVED and len(clean_h) >= 3:
+                    handles.add(clean_h)
+
+    return sorted(handles)
+
+
+_MEMORY_EMB_CACHE: dict[str, np.ndarray] = {}
+
+
+def find_social_handles_from_subject_memory(
+    query_embedding: np.ndarray,
+    results_dir: str | Path = "data/results",
+    similarity_threshold: float = 0.58,
+    fp: Any | None = None,
+) -> list[str]:
+    """
+    Forensics Identity Correlation:
+    If an unindexed face matches a previously verified subject (>= similarity_threshold),
+    recalls that subject's known social handles, usernames, and profiles.
+    """
+    results_path = Path(results_dir)
+    if not results_path.exists():
+        return []
+
+    discovered_handles: set[str] = set()
+
+    try:
+        from app.matcher import cosine_similarity
+        if fp is None:
+            from app.face import FaceProcessor
+            fp = FaceProcessor()
+    except Exception:
+        return []
+
+    cache_file = results_path / ".subject_embeddings.pkl"
+    if cache_file.exists() and not _MEMORY_EMB_CACHE:
+        try:
+            import pickle
+            with open(cache_file, "rb") as f:
+                _MEMORY_EMB_CACHE.update(pickle.load(f))
+        except Exception:
+            pass
+
+    cache_updated = False
+
+    for record_file in sorted(results_path.glob("*.json"), reverse=True):
+        try:
+            with open(record_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            stored_image_path = data.get("query", {}).get("image")
+            if not stored_image_path or not Path(stored_image_path).exists():
+                continue
+
+            if stored_image_path in _MEMORY_EMB_CACHE:
+                stored_emb = _MEMORY_EMB_CACHE[stored_image_path]
+            else:
+                stored_emb = fp.get_embedding(stored_image_path)
+                if stored_emb is not None:
+                    _MEMORY_EMB_CACHE[stored_image_path] = stored_emb
+                    cache_updated = True
+
+            if stored_emb is None:
+                continue
+
+            sim = cosine_similarity(query_embedding, stored_emb)
+
+            if sim >= similarity_threshold:
+                text_to_scan = " ".join([
+                    data.get("match", {}).get("source_url", ""),
+                    data.get("content", {}).get("source_url", ""),
+                    data.get("content", {}).get("text", ""),
+                    data.get("content", {}).get("title", ""),
+                ])
+
+                at_handles = re.findall(r"@([A-Za-z0-9_]+)", text_to_scan)
+                for h in at_handles:
+                    if len(h) >= 3:
+                        discovered_handles.add(h.lower())
+
+                for pattern in [
+                    r"linkedin\.com/in/([A-Za-z0-9_-]+)",
+                    r"linkedin\.com/posts/([A-Za-z0-9_-]+)_",
+                    r"instagram\.com/([A-Za-z0-9_.-]+)",
+                    r"github\.com/([A-Za-z0-9_-]+)",
+                    r"(?:x|twitter)\.com/([A-Za-z0-9_]+)",
+                ]:
+                    for m in re.findall(pattern, text_to_scan, re.IGNORECASE):
+                        discovered_handles.add(m.lower())
+        except Exception:
+            continue
+
+    if cache_updated:
+        try:
+            import pickle
+            with open(cache_file, "wb") as f:
+                pickle.dump(_MEMORY_EMB_CACHE, f)
+        except Exception:
+            pass
+
+    RESERVED = {
+        "posts", "reel", "reels", "p", "share", "explore", "home", "status",
+        "about", "login", "signup", "search", "hashtag", "direct", "stories",
+        "in", "pub", "feed", "jobs", "company", "intent", "i"
+    }
+    return [h for h in sorted(discovered_handles) if h not in RESERVED]
 
 
 # ---------------------------------------------------------------------------

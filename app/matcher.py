@@ -71,9 +71,23 @@ class FaceMatcher:
 
         # Sort by similarity descending
         results.sort(key=lambda r: r.similarity, reverse=True)
+
+        # Profile URL prioritization: if top result is a post URL but a direct
+        # profile URL (/in/) is within 0.05 similarity, prioritize the profile.
+        if len(results) > 1:
+            top_sim = results[0].similarity
+            for i in range(1, min(5, len(results))):
+                if top_sim - results[i].similarity <= 0.05:
+                    u = (results[i].candidate.source_url or "").lower()
+                    top_u = (results[0].candidate.source_url or "").lower()
+                    if "/in/" in u and "/posts/" in top_u:
+                        best = results.pop(i)
+                        results.insert(0, best)
+                        break
+
         return results
 
-    def match_candidates(
+    def match_above_threshold(
         self,
         query_embedding: np.ndarray,
         candidates: list[Candidate],
@@ -86,6 +100,9 @@ class FaceMatcher:
         """
         results = self.match_and_rank(query_embedding, candidates)
         return [r for r in results if r.similarity >= threshold]
+
+    # Alias for backwards compatibility
+    match_candidates = match_above_threshold
 
 
     def _process_candidate(
@@ -102,9 +119,10 @@ class FaceMatcher:
                     error="Failed to download image",
                 )
 
-            # Try to get an embedding (best face if multiple)
-            embedding = self._fp.get_best_embedding_from_image(img)
-            if embedding is None:
+            # Multi-face inspection: inspect ALL detected faces in the candidate image
+            # (e.g. event cards, builder badges, group photos)
+            faces = self._fp._app.get(img)
+            if not faces:
                 return MatchResult(
                     candidate=candidate,
                     similarity=0.0,
@@ -112,10 +130,17 @@ class FaceMatcher:
                     error="No face detected in candidate image",
                 )
 
-            sim = cosine_similarity(query_embedding, embedding)
+            # Compute similarity against every face found and take the highest
+            sims = [
+                cosine_similarity(query_embedding, f.embedding)
+                for f in faces
+                if f.embedding is not None
+            ]
+            best_sim = max(sims) if sims else 0.0
+
             return MatchResult(
                 candidate=candidate,
-                similarity=sim,
+                similarity=float(best_sim),
                 face_detected=True,
             )
 

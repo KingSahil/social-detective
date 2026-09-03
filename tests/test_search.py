@@ -126,3 +126,91 @@ class TestYandexProviderInit:
         with pytest.raises(RuntimeError, match="SERPAPI_KEY"):
             YandexProvider(api_key="your_serpapi_key_here")
 
+
+class TestTwitterProfileProvider:
+    @patch("requests.get")
+    def test_twitter_timeline_extraction(self, mock_get):
+        from app.search import TwitterProfileProvider
+
+        html_mock = """
+        <html>
+          <body>
+            <a href="/testuser/status/1234567890/photo/1">
+              <img src="https://pbs.twimg.com/media/sample_media_1?format=jpg&name=large" />
+            </a>
+            <a href="/testuser/status/9876543210/photo/1">
+              <img src="https://pbs.twimg.com/media/sample_media_2.jpg" />
+            </a>
+          </body>
+        </html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = html_mock
+        mock_get.return_value = mock_resp
+
+        provider = TwitterProfileProvider("@testuser")
+        res = provider.search()
+
+        assert res.provider == "Twitter / X Profile Discovery"
+        assert len(res.candidates) == 2
+        assert res.candidates[0].source_url == "https://x.com/testuser/status/1234567890"
+        assert "sample_media_1" in res.candidates[0].image_url
+        assert res.candidates[1].source_url == "https://x.com/testuser/status/9876543210"
+        assert "sample_media_2" in res.candidates[1].image_url
+
+    def test_extract_social_handles(self):
+        from app.search import extract_social_handles, Candidate
+
+        candidates = [
+            Candidate(image_url="http://example.com/1.jpg", source_url="https://in.linkedin.com/in/khannasparsh", domain="linkedin.com"),
+            Candidate(image_url="http://example.com/2.jpg", source_url="https://www.linkedin.com/posts/kingsahil_startup-activity-12345", domain="linkedin.com"),
+            Candidate(image_url="http://example.com/3.jpg", source_url="https://www.instagram.com/supreme__sahil/", domain="instagram.com"),
+            Candidate(image_url="http://example.com/4.jpg", source_url="https://x.com/Aryannn_6476476/status/1234", domain="x.com"),
+            Candidate(image_url="http://example.com/5.jpg", source_url="https://github.com/torvalds", domain="github.com"),
+            Candidate(image_url="http://example.com/6.jpg", source_url="https://example.com/blog", title="Check out @cooldev on twitter", domain="example.com"),
+        ]
+
+        handles = extract_social_handles(candidates)
+        assert "khannasparsh" in handles
+        assert "kingsahil" in handles
+        assert "supreme__sahil" in handles
+        assert "aryannn_6476476" in handles
+        assert "torvalds" in handles
+        assert "cooldev" in handles
+
+    def test_find_social_handles_from_subject_memory(self, tmp_path):
+        import json
+        import numpy as np
+        from app.search import find_social_handles_from_subject_memory
+
+        dummy_img = tmp_path / "sample.jpg"
+        dummy_img.write_text("fake image content")
+
+        record = {
+            "query": {"image": str(dummy_img)},
+            "match": {"source_url": "https://www.linkedin.com/posts/kingsahil_post-123"},
+            "content": {
+                "source_url": "https://x.com/supreme__sahil/status/11223344",
+                "text": "Check out @blinky_ai on IG!",
+                "title": "Sahil on X",
+            },
+        }
+        rec_file = tmp_path / "record1.json"
+        rec_file.write_text(json.dumps(record), encoding="utf-8")
+
+        mock_fp = MagicMock()
+        emb = np.ones(512, dtype=np.float32)
+        mock_fp.get_embedding.return_value = emb
+
+        recalled = find_social_handles_from_subject_memory(
+            query_embedding=emb,
+            results_dir=tmp_path,
+            similarity_threshold=0.58,
+            fp=mock_fp,
+        )
+
+        assert "kingsahil" in recalled
+        assert "supreme__sahil" in recalled
+        assert "blinky_ai" in recalled
+

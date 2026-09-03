@@ -87,6 +87,7 @@ def run_pipeline(
     platform: str | None = None,
     target: str | None = None,
     engine: str = "all",
+    handle: str | None = None,
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -165,11 +166,49 @@ def run_pipeline(
             "platforms": discovered_platforms,
         }
 
+    elif handle:
+        _step(2, total_steps, "TWITTER TIMELINE SEARCH")
+        from app.search import TwitterProfileProvider
+
+        search_provider = TwitterProfileProvider(handle=handle)
+        _info(f"Searching Twitter timeline for: {C_CYAN}@{search_provider.handle}{C_RESET}")
+        _info("Extracting post media...")
+
+        try:
+            search_result = search_provider.search(str(image_path_obj))
+        except Exception as e:
+            _fatal(f"Failed to scrape Twitter profile: {e}")
+
+        candidate_count = len(search_result.candidates)
+        if candidate_count == 0:
+            _fail(f"No media images found for @{search_provider.handle}")
+            print()
+            sys.exit(1)
+
+        _ok("Timeline media extracted")
+        _ok(f"{candidate_count} candidate media images discovered from @{search_provider.handle}")
+        print()
+
+        discovered_platforms = ["x.com"]
+        record["search"] = {
+            "provider": search_provider.PROVIDER_NAME,
+            "handle": search_provider.handle,
+            "searched_at": search_result.searched_at,
+            "candidate_count": candidate_count,
+            "platforms": discovered_platforms,
+        }
+
     else:
         _step(2, total_steps, "WEB SEARCH")
 
         from app.config import require_search_config
-        from app.search import SerpAPIProvider, YandexProvider
+        from app.search import (
+            SerpAPIProvider,
+            YandexProvider,
+            TwitterProfileProvider,
+            extract_social_handles,
+            find_social_handles_from_subject_memory,
+        )
         from app.matcher import FaceMatcher
         import tempfile
         import cv2
@@ -199,7 +238,36 @@ def run_pipeline(
 
         _ok("Search completed")
         _ok(f"{candidate_count} candidates discovered across the web")
-        
+
+        # Automated Cross-Platform Social Pivoting (OSINT Discovery)
+        _info("Scanning cross-platform social identity memory...")
+        discovered_handles = set(extract_social_handles(search_result.candidates))
+        recalled_handles = set(find_social_handles_from_subject_memory(query_embedding, fp=fp))
+        all_pivot_handles = sorted(discovered_handles | recalled_handles)
+
+        if all_pivot_handles:
+            _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles[:4]])}" + (f" (+{len(all_pivot_handles)-4} more)" if len(all_pivot_handles) > 4 else ""))
+            tw_added = 0
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _fetch_tw(h: str):
+                try:
+                    tw_prov = TwitterProfileProvider(h)
+                    return h, tw_prov.search()
+                except Exception:
+                    return h, None
+
+            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles), 6)) as pool:
+                futures = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
+                for fut in as_completed(futures):
+                    h, tw_res = fut.result()
+                    if tw_res and tw_res.candidates:
+                        search_result.candidates.extend(tw_res.candidates)
+                        tw_added += len(tw_res.candidates)
+                        _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
+            if tw_added > 0:
+                candidate_count = len(search_result.candidates)
+
         # Show platforms discovered across the web
         discovered_platforms = sorted({c.domain for c in search_result.candidates if c.domain})
         if discovered_platforms:
@@ -509,6 +577,13 @@ def main() -> None:
         help="Optional: direct URL of a specific post or page to verify against the query face (e.g. an X post, Reddit thread, or article).",
     )
     parser.add_argument(
+        "--handle",
+        "--user",
+        type=str,
+        default=None,
+        help="Optional: search a specific user's public Twitter/X timeline for candidate posts without specifying post URL.",
+    )
+    parser.add_argument(
         "--engine",
         type=str,
         choices=["all", "lens", "yandex"],
@@ -533,7 +608,14 @@ def main() -> None:
         sys.exit(0 if result.get("verified") else 1)
 
     elif args.image:
-        run_pipeline(args.image, threshold=args.threshold, platform=args.platform, target=args.target, engine=args.engine)
+        run_pipeline(
+            args.image,
+            threshold=args.threshold,
+            platform=args.platform,
+            target=args.target,
+            engine=args.engine,
+            handle=args.handle,
+        )
 
     else:
         parser.print_help()

@@ -29,9 +29,18 @@ data/input/*.jpg
 data/input/*.png
 data/input/*.jpeg
 data/results/*.json
+data/results/*.jsonl
 
 # InsightFace models cache
 models/
 
 # Compiled contracts
 contracts/*.json
+
+#remove jpg from data/results
+data/results/*.jpg
+data/results/*.png
+data/results/*.jpeg
+data/results/test_face_1_crop.jpg
+data/results/*.pkl
+

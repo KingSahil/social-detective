@@ -124,6 +124,39 @@ class ContentRetriever:
             except Exception:
                 pass
 
+        # Special handling for Twitter / X posts via oEmbed and FxTwitter
+        if ("x.com" in domain or "twitter.com" in domain) and "/status/" in source_url:
+            try:
+                oembed_url = f"https://publish.twitter.com/oembed?url={source_url}&omit_script=true"
+                r_oe = requests.get(oembed_url, timeout=6)
+                if r_oe.status_code == 200:
+                    oe_data = r_oe.json()
+                    content.author = oe_data.get("author_name")
+                    raw_html = oe_data.get("html", "")
+                    clean_text = BeautifulSoup(raw_html, "html.parser").get_text(separator=" ", strip=True)
+                    if clean_text:
+                        content.text = clean_text
+                        content.title = f"{content.author} on X: \"{clean_text[:100]}...\""
+            except Exception:
+                pass
+
+            if not content.text or content.text == content.description:
+                try:
+                    import re
+                    m_tw = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]+)/status/(\d+)", source_url)
+                    if m_tw:
+                        user_h, status_id = m_tw.group(1), m_tw.group(2)
+                        fx_url = f"https://api.fxtwitter.com/{user_h}/status/{status_id}"
+                        r_fx = requests.get(fx_url, timeout=6)
+                        if r_fx.status_code == 200:
+                            fx_data = r_fx.json().get("tweet", {})
+                            content.author = fx_data.get("author", {}).get("name") or user_h
+                            if fx_data.get("text"):
+                                content.text = fx_data["text"]
+                                content.title = f"{content.author} on X: \"{content.text[:100]}...\""
+                except Exception:
+                    pass
+
         # Download the actual image bytes (for content hashing)
         try:
             img_resp = requests.get(image_url, timeout=self._timeout)
