@@ -56,6 +56,54 @@ class SearchProvider(abc.ABC):
         ...
 
 
+BLOCKED_KEYWORDS = {
+    "xhamster", "loveplanet", "zamantika", "mybro.tv", "porn", "adult", "escort",
+    "webcam", "stripchat", "bongacams", "chaturbate", "livejasmin", "onlyfans",
+    "dating", "hookup", "sexy", "nsfw", "xxx", "erotic"
+}
+
+SOCIAL_DOMAINS = [
+    "x.com", "twitter.com", "instagram.com", "linkedin.com", "reddit.com",
+    "facebook.com", "threads.net", "youtube.com", "github.com", "pinterest.com",
+    "tiktok.com", "medium.com", "quora.com"
+]
+
+
+def filter_and_prioritize_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    """
+    1. Removes any candidate from adult, shady, or spam domains.
+    2. Prioritizes legitimate social media platforms (Twitter/X, LinkedIn, Instagram, Reddit, etc.)
+       at the top of the candidate list for facial analysis.
+    """
+    clean: list[Candidate] = []
+    seen: set[str] = set()
+
+    for c in candidates:
+        if not c.source_url or c.source_url in seen:
+            continue
+        url_lower = c.source_url.lower()
+        domain_lower = (c.domain or "").lower()
+
+        # Discard blocked domains
+        if any(bad in url_lower or bad in domain_lower for bad in BLOCKED_KEYWORDS):
+            continue
+
+        seen.add(c.source_url)
+        clean.append(c)
+
+    # Sort so that social media domains come first
+    def _social_priority(c: Candidate) -> int:
+        d = (c.domain or "").lower()
+        u = (c.source_url or "").lower()
+        for idx, s in enumerate(SOCIAL_DOMAINS):
+            if s in d or s in u:
+                return idx
+        return 999
+
+    clean.sort(key=_social_priority)
+    return clean
+
+
 # ---------------------------------------------------------------------------
 # SerpAPI Google Lens provider
 # ---------------------------------------------------------------------------
@@ -179,16 +227,11 @@ class SerpAPIProvider(SearchProvider):
                     domain=item.get("source", ""),
                 ))
 
-        # Deduplicate by source_url
-        seen: set[str] = set()
-        unique: list[Candidate] = []
-        for c in candidates:
-            if c.source_url not in seen:
-                seen.add(c.source_url)
-                unique.append(c)
+        # Filter blocked domains and prioritize social media
+        filtered = filter_and_prioritize_candidates(candidates)
 
         return SearchResult(
-            candidates=unique,
+            candidates=filtered,
             provider=self.PROVIDER_NAME,
             searched_at=timestamp,
             raw_response=raw,
@@ -285,9 +328,18 @@ class YandexProvider(SearchProvider):
         if "error" in raw:
             raise RuntimeError(f"SerpAPI Yandex error: {raw['error']}")
 
+        def _extract_link(val) -> str:
+            if isinstance(val, dict):
+                return val.get("link", "") or val.get("url", "") or ""
+            return str(val) if isinstance(val, str) else ""
+
         candidates: list[Candidate] = []
         for item in raw.get("image_results", []):
-            img_url = item.get("thumbnail", "") or item.get("image", "") or item.get("original", "")
+            img_url = (
+                _extract_link(item.get("original_image"))
+                or _extract_link(item.get("thumbnail"))
+                or _extract_link(item.get("image"))
+            )
             src_url = item.get("link", "")
             title = item.get("title", "")
             domain = item.get("source", "")
@@ -300,7 +352,10 @@ class YandexProvider(SearchProvider):
                 ))
 
         for item in raw.get("similar_images", []):
-            img_url = item.get("thumbnail", "") or item.get("image", "")
+            img_url = (
+                _extract_link(item.get("image"))
+                or _extract_link(item.get("thumbnail"))
+            )
             src_url = item.get("link", "")
             title = item.get("title", "")
             domain = item.get("source", "")
@@ -312,16 +367,11 @@ class YandexProvider(SearchProvider):
                     domain=domain,
                 ))
 
-        # Deduplicate by source_url
-        seen: set[str] = set()
-        unique: list[Candidate] = []
-        for c in candidates:
-            if c.source_url not in seen:
-                seen.add(c.source_url)
-                unique.append(c)
+        # Filter blocked domains and prioritize social media
+        filtered = filter_and_prioritize_candidates(candidates)
 
         return SearchResult(
-            candidates=unique,
+            candidates=filtered,
             provider=self.PROVIDER_NAME,
             searched_at=timestamp,
             raw_response=raw,

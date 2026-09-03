@@ -56,12 +56,18 @@ class FaceMatcher:
         For each candidate, download the image, extract a face embedding,
         and compute cosine similarity. Returns all results sorted by similarity (descending).
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         results: list[MatchResult] = []
 
-        for cand in candidates:
-            result = self._process_candidate(query_embedding, cand)
-            if result is not None:
-                results.append(result)
+        def _worker(cand: Candidate) -> Optional[MatchResult]:
+            return self._process_candidate(query_embedding, cand)
+
+        max_workers = min(20, max(1, len(candidates)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for result in executor.map(_worker, candidates):
+                if result is not None:
+                    results.append(result)
 
         # Sort by similarity descending
         results.sort(key=lambda r: r.similarity, reverse=True)
@@ -124,7 +130,14 @@ class FaceMatcher:
     def _download_image(self, url: str) -> Optional[np.ndarray]:
         """Download an image URL and decode it as a BGR numpy array."""
         try:
-            resp = requests.get(url, timeout=self._timeout, stream=True)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+            resp = requests.get(url, timeout=min(8.0, self._timeout), headers=headers)
             resp.raise_for_status()
             data = resp.content
             # Decode with OpenCV
