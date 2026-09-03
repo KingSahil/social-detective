@@ -56,12 +56,17 @@ class ContentRetriever:
 
         # Fetch the source page
         try:
-            resp = requests.get(source_url, timeout=self._timeout, headers={
-                "User-Agent": (
+            user_agent = (
+                "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+                if "instagram.com" in domain
+                else (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
-                ),
+                )
+            )
+            resp = requests.get(source_url, timeout=self._timeout, headers={
+                "User-Agent": user_agent,
                 "Accept-Language": "en-US,en;q=0.9",
             })
             resp.raise_for_status()

@@ -102,14 +102,35 @@ class SerpAPIProvider(SearchProvider):
 
         client = serpapi_mod.Client(api_key=self._api_key)
 
-        # Step 1: Upload local image to get a temporary image_id
+        # Step 1: Sanitize and upload local image to get a temporary image_id
+        upload_path = str(image_path)
+        temp_upload_file = None
         try:
-            upload_result = client.upload_image(str(image_path))
+            from PIL import Image
+            with Image.open(str(image_path)) as im:
+                if im.format != "JPEG" or im.mode != "RGB":
+                    import tempfile
+                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    temp_upload_file = tmp.name
+                    tmp.close()
+                    im.convert("RGB").save(temp_upload_file, "JPEG", quality=95)
+                    upload_path = temp_upload_file
+        except Exception:
+            pass
+
+        try:
+            upload_result = client.upload_image(upload_path)
             image_id = upload_result.get("image_id")
             if not image_id:
                 raise RuntimeError(f"Upload succeeded but no image_id returned: {upload_result}")
         except Exception as e:
             raise RuntimeError(f"Image upload to SerpAPI failed: {e}")
+        finally:
+            if temp_upload_file and Path(temp_upload_file).exists():
+                try:
+                    Path(temp_upload_file).unlink()
+                except OSError:
+                    pass
 
         # Step 2: Google Lens search using image_id
         try:
@@ -223,12 +244,17 @@ class TargetURLProvider(SearchProvider):
                 raw_response={"target_url": self.target_url, "image_count": 1},
             )
 
-        headers = {
-            "User-Agent": (
+        user_agent = (
+            "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+            if "instagram.com" in domain
+            else (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            )
+        )
+        headers = {
+            "User-Agent": user_agent,
             "Accept-Language": "en-US,en;q=0.9",
         }
 
