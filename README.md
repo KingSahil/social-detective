@@ -52,15 +52,22 @@ flowchart TD
     subgraph P2 ["Phase 2: Multi-Engine Search Cascade & OSINT Discovery"]
         ROUTER{"Execution Mode<br/>Targeted vs Cascade"}:::searchNode
 
-        T_URL["Target URL Extractor<br/>Instagram Carousels, X/Twitter, Reddit, Web"]:::searchNode
+        T_URL["Target URL Extractor<br/>Instagram Carousels, X/Twitter, LinkedIn, Web"]:::searchNode
         T_USER["Twitter Timeline Provider<br/>Direct Profile Media Tweet Extraction"]:::searchNode
 
         LENS["Primary: Google Lens Visual Search<br/>SerpAPI Reverse Image Discovery"]:::searchNode
         LENS_CROP["Fallback 1: Cropped Face Search<br/>Focused Facial Geometry Query"]:::searchNode
         YANDEX["Fallback 2: Yandex Images<br/>Deep Biometric Facial Search"]:::searchNode
-        PIVOT["OSINT Identity & Network Pivoting<br/>Social Handles & Associate Graph Sweep"]:::searchNode
 
-        MEDIA_POOL[("Candidate Media Pool<br/>Post URLs, Image URLs, Platform Metadata")]:::searchNode
+        subgraph PIVOT_SYS ["OSINT Identity Memory & Network Pivoting"]
+            MEMORY["Subject Identity Memory<br/>Correlates 512-d Face Vector to Known Records"]:::searchNode
+            TW_PIVOT["Twitter Profile Provider<br/>Concurrent Media Timeline Sweep"]:::searchNode
+            IG_PIVOT["Instagram Profile Provider<br/>2-Hop Collaborator Tag Pivoting & DDGS Resilience"]:::searchNode
+            LI_PIVOT["LinkedIn Post Provider<br/>Associate Forensics & Open Graph Post Discovery"]:::searchNode
+            UNPACK["Carousel Unpacker<br/>Decomposes GraphSidecar Posts into Discrete Slides"]:::searchNode
+        end
+
+        MEDIA_POOL[("Candidate Media Pool<br/>Post URLs, Carousel Slides, Image URLs, Metadata")]:::searchNode
 
         EMB --> ROUTER
         ROUTER -->|"--target URL"| T_URL
@@ -69,15 +76,23 @@ flowchart TD
 
         LENS -->|"No match above threshold"| LENS_CROP
         LENS_CROP -->|"Still below threshold"| YANDEX
-        LENS -.->|"Discovered Handles"| PIVOT
-        YANDEX -.->|"Associate Leads"| PIVOT
+        YANDEX -->|"Visual search 0 direct hits"| LI_PIVOT
+
+        LENS -.->|"Discovered Handles"| MEMORY
+        EMB -.->|"Biometric Match"| MEMORY
+        MEMORY --> TW_PIVOT
+        MEMORY --> IG_PIVOT
+        IG_PIVOT --> UNPACK
 
         T_URL --> MEDIA_POOL
         T_USER --> MEDIA_POOL
         LENS --> MEDIA_POOL
         LENS_CROP --> MEDIA_POOL
         YANDEX --> MEDIA_POOL
-        PIVOT --> MEDIA_POOL
+        TW_PIVOT --> MEDIA_POOL
+        IG_PIVOT --> MEDIA_POOL
+        LI_PIVOT --> MEDIA_POOL
+        UNPACK --> MEDIA_POOL
     end
 
     %% ─────────────────────────────────────────────────────────────
@@ -154,7 +169,7 @@ flowchart TD
 | Phase | Stage | Engine / Technology | Description |
 |---|---|---|---|
 | **1** | **Biometric Intake** | InsightFace & ArcFace (`buffalo_l`) | Detects face landmarks, generates 512-d normalized embedding vector & tight portrait crops. |
-| **2** | **Search Cascade & OSINT** | Google Lens, Yandex & Scrapers | Multi-engine cascade (Lens → Crop → Yandex) plus targeted scraping (`--target`, `--handle`) & associate pivoting. |
+| **2** | **Search Cascade & OSINT** | Multi-Engine Cascade & OSINT Pivoting | Visual cascade (Lens → Crop → Yandex) plus concurrent social identity memory (Twitter timelines, Instagram 2-hop collaborator tag search & carousel unpacking, LinkedIn associate graph). |
 | **3** | **Biometric Verification** | Cosine Similarity Ranking | Computes cosine similarity between query and candidate face vectors; filters and ranks matches. |
 | **4** | **Forensic Acquisition** | ContentRetriever & SHA-256 | Extracts public post metadata, downloads raw image bytes, and formats deterministic canonical JSON. |
 | **5** | **Blockchain Notarization** | Web3.py & Solidity 0.8.19 | Submits immutable 32-byte content hash to `ContentRegistry.sol` on Ethereum Sepolia testnet. |
@@ -166,8 +181,12 @@ flowchart TD
 
 - **Face Detection & Encoding** — InsightFace with ArcFace (`buffalo_l` model, 512-d embeddings)
 - **Multi-Engine Visual Search** — SerpAPI Google Lens + Yandex Images reverse search cascade
-- **Deep Social Discovery** — Instaloader integration for Instagram carousels (`GraphSidecar`), author metadata, and captions
-- **Targeted Post Inspection (`--target`)** — Dynamically parses candidate media from Twitter/X, Instagram, LinkedIn, and web posts
+- **Subject Identity Memory** — Persistent forensic memory correlating 512-d biometric vectors with past verified investigations
+- **Multi-Platform OSINT Pivoting** — Concurrent timeline and post sweeping across X/Twitter, Instagram, and LinkedIn
+- **2-Hop Collaborator Tag Pivoting** — Recursively extracts co-occurring tagged handles from captions and titles to locate unindexed posts
+- **Instagram Carousel Unpacking** — Automatically decomposes multi-photo carousel posts (`GraphSidecar`) into individual slide candidates (`?img_index=N`) to evaluate all faces
+- **Zero-Quota Search Resilience** — SerpAPI integration backed by free `ddgs` (DuckDuckGo Search) fallback for uninterrupted operations
+- **Targeted Post Inspection (`--target`)** — Dynamically parses candidate media from Twitter/X, Instagram, LinkedIn, and arbitrary web pages
 - **Face Similarity Matching** — ArcFace cosine similarity ranking with configurable threshold
 - **Content Fingerprinting** — SHA-256 hash of canonical content + raw image bytes
 - **Blockchain Recording** — Ethereum Sepolia smart contract for tamper-evident storage
@@ -191,11 +210,11 @@ flowchart TD
      <img src="docs/assets/face_embedding_concept.jpg" alt="Understanding AI Face Embedding and Facial Geometry" width="750"/>
    </p>
 
-2. **Open Web Search (*The detective search*)**:
-   The query photo is searched across Google Lens and Yandex Images via SerpAPI to conduct a **live, runtime reverse-image search** across dozens of platforms including **Reddit, Instagram, X/Twitter, Facebook, and Wikipedia**.
+2. **Open Web Search & OSINT Pivoting (*The detective search*)**:
+   The query photo is searched across Google Lens and Yandex Images. If visual reverse search hits an index blindspot (e.g. client-rendered feeds or private carousels), FaceTrace pivots across **Subject Identity Memory**, sweeping **X/Twitter timelines, LinkedIn posts, and Instagram carousels** using 2-hop collaborator tag correlation.
 
 3. **Digital Lineup (*Face similarity ranking*)**:
-   The application downloads candidate images found online and runs facial recognition on each one, computing a mathematical similarity score (e.g., *97.4% match*). The candidate with the strongest face similarity is selected.
+   The application downloads candidate images found online (including unpacked carousel slides and event cards) and runs multi-face recognition on each one, computing a mathematical similarity score (e.g., *97.4% match*). The candidate with the strongest face similarity is selected.
 
 4. **Evidence Collection (*Capturing the post*)**:
    Public metadata from the winning post is extracted: source URL, page title, author handle, text/captions, domain, and the raw image bytes.
@@ -220,8 +239,9 @@ flowchart TD
 |-----------|-----------|
 | Face Detection | InsightFace / ArcFace (buffalo_l) |
 | Face Embeddings | 512-d ArcFace via ONNX Runtime |
-| Web Search Engines | SerpAPI Google Lens & Yandex Images |
-| Social Scrapers | Instaloader (Instagram) & BeautifulSoup4 |
+| Web Search Engines | SerpAPI Google Lens, Yandex Images & `ddgs` (DuckDuckGo) |
+| OSINT Pivoting | TwitterProfileProvider, InstagramProfileProvider, LinkedInPostProvider |
+| Social Scrapers | Instaloader (Instagram carousels) & BeautifulSoup4 |
 | Content Hashing | SHA-256 (hashlib) |
 | Blockchain | Ethereum Sepolia + Solidity 0.8.19 |
 | Smart Contract | Web3.py + py-solc-x |
