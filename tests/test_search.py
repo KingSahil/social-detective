@@ -326,5 +326,59 @@ class TestTwitterProfileProvider:
         assert res.candidates[0].image_url == "https://instagram.fluh/slide1.webp"
         assert "img_index=2" in res.candidates[1].source_url
 
+    def test_instagram_profile_provider_unwraps_google_redirect(self, monkeypatch):
+        from app.search import InstagramProfileProvider
+
+        mock_serp = MagicMock()
+        mock_client = MagicMock()
+        mock_serp.Client.return_value = mock_client
+        mock_client.search.return_value = {
+            "organic_results": [
+                {
+                    "link": "https://www.google.com/url?q=https%3A%2F%2Fwww.instagram.com%2Freel%2FDbvdVHXOLSG%2F&sa=U",
+                    "title": "supreme__sahil on Instagram: ML demo",
+                    "snippet": "Custom implementation",
+                    "displayed_link": "instagram.com/reel",
+                }
+            ]
+        }
+        monkeypatch.setattr("serpapi.Client", mock_serp.Client)
+
+        mock_post = MagicMock()
+        mock_post.typename = "GraphVideo"
+        mock_post.owner_username = "supreme__sahil"
+        mock_post.caption = "Custom implementation"
+        mock_post.url = "https://instagram.fluh/cover.jpg"
+
+        monkeypatch.setattr("instaloader.Post.from_shortcode", lambda ctx, sc: mock_post)
+
+        prov = InstagramProfileProvider(api_key="valid_key")
+        res = prov.search_handles(["supreme__sahil"])
+
+        assert len(res.candidates) == 1
+        assert "DbvdVHXOLSG" in res.candidates[0].source_url
+        assert res.candidates[0].image_url == "https://instagram.fluh/cover.jpg"
+
+    def test_extract_social_handles_from_instagram_titles(self):
+        from app.search import Candidate, extract_social_handles
+
+        candidates = [
+            Candidate(
+                image_url="https://cdn.example.com/1.jpg",
+                source_url="https://www.instagram.com/p/DbvdVHXOLSG/",
+                title="supreme__sahil on Instagram: \"Cool project\"",
+                domain="instagram.com",
+            ),
+            Candidate(
+                image_url="https://cdn.example.com/2.jpg",
+                source_url="https://www.instagram.com/reel/XYZ123/",
+                title="Instagram post by dev_expert",
+                domain="instagram.com",
+            ),
+        ]
+        handles = extract_social_handles(candidates)
+        assert "supreme__sahil" in handles
+        assert "dev_expert" in handles
+
 
 

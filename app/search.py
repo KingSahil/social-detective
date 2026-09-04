@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin
+from contextlib import contextmanager
+import threading
 
 import numpy as np
 import requests
@@ -699,13 +701,23 @@ def extract_social_handles(candidates: list[Candidate]) -> list[str]:
                 if h and h not in RESERVED and len(h) >= 3:
                     handles.add(h)
 
-        # Also look in candidate title for @handle
+        # Also look in candidate title for @handle or "<handle> on Instagram"
         title = c.title or ""
         for word in title.split():
             if word.startswith("@") and len(word) > 2:
                 clean_h = re.sub(r"[^A-Za-z0-9_]", "", word).lower()
                 if clean_h and clean_h not in RESERVED and len(clean_h) >= 3:
                     handles.add(clean_h)
+
+        for m_ig_name in re.findall(r"([A-Za-z0-9_.]{3,30})\s+on Instagram", title, re.IGNORECASE):
+            h_clean = m_ig_name.lower().strip()
+            if h_clean not in RESERVED and len(h_clean) >= 3:
+                handles.add(h_clean)
+
+        for m_ig_by in re.findall(r"Instagram post by\s+([A-Za-z0-9_.]{3,30})", title, re.IGNORECASE):
+            h_clean = m_ig_by.lower().strip()
+            if h_clean not in RESERVED and len(h_clean) >= 3:
+                handles.add(h_clean)
 
     return sorted(handles)
 
@@ -772,11 +784,23 @@ def find_social_handles_from_subject_memory(
             sim = cosine_similarity(query_embedding, stored_emb)
 
             if sim >= similarity_threshold:
+                # Direct structured author/handle fields if present in record
+                for auth_field in [
+                    data.get("match", {}).get("author"),
+                    data.get("content", {}).get("author"),
+                    data.get("search", {}).get("handle"),
+                ]:
+                    if auth_field and isinstance(auth_field, str):
+                        clean_a = auth_field.lstrip("@").strip().lower()
+                        if clean_a not in RESERVED and len(clean_a) >= 3:
+                            discovered_handles.add(clean_a)
+
                 text_to_scan = " ".join([
                     data.get("match", {}).get("source_url", ""),
                     data.get("content", {}).get("source_url", ""),
                     data.get("content", {}).get("text", ""),
                     data.get("content", {}).get("title", ""),
+                    data.get("match", {}).get("title", ""),
                 ])
 
                 at_handles = re.findall(r"@([A-Za-z0-9_]+)", text_to_scan)
@@ -790,6 +814,9 @@ def find_social_handles_from_subject_memory(
                     r"instagram\.com/([A-Za-z0-9_.-]+)",
                     r"github\.com/([A-Za-z0-9_-]+)",
                     r"(?:x|twitter)\.com/([A-Za-z0-9_]+)",
+                    r"([A-Za-z0-9_.]{3,30})\s+on Instagram",
+                    r"Instagram post by\s+([A-Za-z0-9_.]{3,30})",
+                    r"\(@([A-Za-z0-9_.]{3,30})\)\s+on Instagram",
                 ]:
                     for m in re.findall(pattern, text_to_scan, re.IGNORECASE):
                         discovered_handles.add(m.lower())
@@ -938,6 +965,46 @@ class LinkedInPostProvider(SearchProvider):
 # Instagram Profile & Post Provider (OSINT Social Pivot)
 # ---------------------------------------------------------------------------
 
+_C_STDERR_LOCK = threading.Lock()
+_DDGS_LOCK = threading.Lock()
+
+@contextmanager
+def _suppress_c_stderr():
+    """
+    Suppresses OS-level C/Rust file descriptor 2 (stderr) output.
+    Used to silence low-level rustls/h2 EOF messages printed directly to stderr
+    by the primp HTTP client when servers close connections without close_notify.
+    """
+    with _C_STDERR_LOCK:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            old_stderr = os.dup(2)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+            try:
+                yield
+            finally:
+                os.dup2(old_stderr, 2)
+                os.close(old_stderr)
+        except Exception:
+            yield
+
+
+def _safe_ddgs_text(q: str, max_results: int = 15) -> list[dict]:
+    """
+    Thread-safe and stderr-sanitized wrapper around DDGS.text().
+    Prevents concurrent connection flooding and silences rustls/h2 EOF warnings.
+    """
+    with _DDGS_LOCK:
+        with _suppress_c_stderr():
+            try:
+                from ddgs import DDGS
+                d = DDGS(timeout=5)
+                return list(d.text(q, max_results=max_results))
+            except Exception:
+                return []
+
+
 class InstagramProfileProvider(SearchProvider):
     """
     Discovers public Instagram posts and reels for suspected handles and their associates.
@@ -1001,6 +1068,36 @@ class InstagramProfileProvider(SearchProvider):
         discovered_shortcodes: set[str] = set()
         discovered_tags: set[str] = set()
 
+        def _extract_sc_from_url(u: str) -> str | None:
+            if not u:
+                return None
+            m = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", u)
+            if m:
+                return m.group(1)
+            if "google.com" in u:
+                try:
+                    from urllib.parse import urlparse, parse_qs, unquote
+                    parsed = urlparse(u)
+                    qs = parse_qs(parsed.query)
+                    for param in ["url", "q"]:
+                        if param in qs:
+                            target_u = unquote(qs[param][0])
+                            m_target = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", target_u)
+                            if m_target:
+                                return m_target.group(1)
+                except Exception:
+                    pass
+                try:
+                    r_head = requests.head(u, allow_redirects=False, timeout=3.0)
+                    loc = r_head.headers.get("Location")
+                    if loc:
+                        m_loc = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", loc)
+                        if m_loc:
+                            return m_loc.group(1)
+                except Exception:
+                    pass
+            return None
+
         def _execute_query(q: str):
             res_codes = set()
             res_tags = set()
@@ -1014,13 +1111,22 @@ class InstagramProfileProvider(SearchProvider):
                                 link = item.get("link", "")
                                 title = item.get("title", "")
                                 snippet = item.get("snippet", "")
-                                m = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", link)
-                                if m:
-                                    res_codes.add(m.group(1))
+                                disp_link = item.get("displayed_link", "")
+
+                                sc = _extract_sc_from_url(link)
+                                if not sc:
+                                    sc_text = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", f"{disp_link} {title} {snippet}")
+                                    if sc_text:
+                                        sc = sc_text.group(1)
+                                if sc:
+                                    res_codes.add(sc)
+
                                 tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {snippet}")
+                                for m_t in re.findall(r"([A-Za-z0-9_.]{3,30})\s+on Instagram", f"{title} {snippet}", re.IGNORECASE):
+                                    tags.append(m_t)
                                 for t in tags:
                                     t_clean = t.lower()
-                                    if t_clean not in [h.lower() for h in clean_handles]:
+                                    if t_clean not in [h.lower() for h in clean_handles] and t_clean not in {"instagram", "p", "reel", "reels"}:
                                         res_tags.add(t)
                             if res_codes:
                                 break
@@ -1037,19 +1143,23 @@ class InstagramProfileProvider(SearchProvider):
             # 2. Free DDGS fallback if no codes yet or SerpAPI is out of quota
             if not res_codes:
                 try:
-                    from ddgs import DDGS
-                    d = DDGS()
-                    for it in d.text(q, max_results=15):
+                    for it in _safe_ddgs_text(q, max_results=15):
                         href = it.get("href", "")
                         title = it.get("title", "")
                         body = it.get("body", "")
-                        m = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", href)
-                        if m:
-                            res_codes.add(m.group(1))
+                        sc = _extract_sc_from_url(href)
+                        if not sc:
+                            sc_text = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", f"{title} {body}")
+                            if sc_text:
+                                sc = sc_text.group(1)
+                        if sc:
+                            res_codes.add(sc)
                         tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {body}")
+                        for m_t in re.findall(r"([A-Za-z0-9_.]{3,30})\s+on Instagram", f"{title} {body}", re.IGNORECASE):
+                            tags.append(m_t)
                         for t in tags:
                             t_clean = t.lower()
-                            if t_clean not in [h.lower() for h in clean_handles]:
+                            if t_clean not in [h.lower() for h in clean_handles] and t_clean not in {"instagram", "p", "reel", "reels"}:
                                 res_tags.add(t)
                 except Exception:
                     pass

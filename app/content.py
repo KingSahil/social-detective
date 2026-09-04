@@ -30,6 +30,7 @@ class DiscoveredContent:
     title: str = ""
     description: str = ""
     text: str = ""
+    author: str = ""
     retrieved_at: str = ""
     image_bytes: bytes = field(default=b"", repr=False)
 

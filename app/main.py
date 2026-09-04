@@ -167,32 +167,78 @@ def run_pipeline(
         }
 
     elif handle:
-        _step(2, total_steps, "TWITTER TIMELINE SEARCH")
-        from app.search import TwitterProfileProvider
+        _step(2, total_steps, "PROFILE & TIMELINE SEARCH")
+        from app.search import TwitterProfileProvider, InstagramProfileProvider, SearchResult, Candidate
+        from app.config import require_search_config
+        from concurrent.futures import ThreadPoolExecutor
 
-        search_provider = TwitterProfileProvider(handle=handle)
-        _info(f"Searching Twitter timeline for: {C_CYAN}@{search_provider.handle}{C_RESET}")
-        _info("Extracting post media...")
+        clean_handle = handle.lstrip("@").strip()
+        p_lower = (platform or "").lower().strip()
+        do_ig = p_lower in {"instagram", "ig", "insta"} or p_lower in {"all", ""}
+        do_tw = p_lower in {"twitter", "x"} or p_lower in {"all", ""}
 
-        try:
-            search_result = search_provider.search(str(image_path_obj))
-        except Exception as e:
-            _fatal(f"Failed to scrape Twitter profile: {e}")
+        target_platforms = []
+        if do_tw:
+            target_platforms.append("X/Twitter")
+        if do_ig:
+            target_platforms.append("Instagram")
+
+        _info(f"Searching {', '.join(target_platforms)} for: {C_CYAN}@{clean_handle}{C_RESET}")
+        _info("Extracting candidate media...")
+
+        all_candidates: list[Candidate] = []
+
+        def _search_twitter() -> list[Candidate]:
+            try:
+                tw = TwitterProfileProvider(handle=clean_handle)
+                res = tw.search(str(image_path_obj))
+                return res.candidates if res else []
+            except Exception:
+                return []
+
+        def _search_instagram() -> list[Candidate]:
+            try:
+                api_key = require_search_config()
+                ig = InstagramProfileProvider(api_key=api_key)
+                res = ig.search_handles([clean_handle])
+                return res.candidates if res else []
+            except Exception:
+                return []
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tw_fut = pool.submit(_search_twitter) if do_tw else None
+            ig_fut = pool.submit(_search_instagram) if do_ig else None
+
+            if tw_fut:
+                tw_cands = tw_fut.result()
+                if tw_cands:
+                    all_candidates.extend(tw_cands)
+                    _ok(f"Extracted {len(tw_cands)} media candidate(s) from @{clean_handle} on X/Twitter")
+            if ig_fut:
+                ig_cands = ig_fut.result()
+                if ig_cands:
+                    all_candidates.extend(ig_cands)
+                    _ok(f"Extracted {len(ig_cands)} media candidate(s) from @{clean_handle} on Instagram")
+
+        search_result = SearchResult(
+            candidates=all_candidates,
+            provider="Multi-Platform Profile Discovery" if (do_tw and do_ig) else ("Instagram Profile Discovery" if do_ig else "Twitter Timeline Search"),
+            searched_at=datetime.now(timezone.utc).isoformat(),
+        )
 
         candidate_count = len(search_result.candidates)
         if candidate_count == 0:
-            _fail(f"No media images found for @{search_provider.handle}")
+            _fail(f"No media images found for @{clean_handle} across {', '.join(target_platforms)}")
             print()
             sys.exit(1)
 
-        _ok("Timeline media extracted")
-        _ok(f"{candidate_count} candidate media images discovered from @{search_provider.handle}")
+        _ok(f"{candidate_count} total candidate media images discovered for @{clean_handle}")
         print()
 
-        discovered_platforms = ["x.com"]
+        discovered_platforms = sorted({c.domain for c in search_result.candidates if c.domain})
         record["search"] = {
-            "provider": search_provider.PROVIDER_NAME,
-            "handle": search_provider.handle,
+            "provider": search_result.provider,
+            "handle": clean_handle,
             "searched_at": search_result.searched_at,
             "candidate_count": candidate_count,
             "platforms": discovered_platforms,
@@ -327,7 +373,7 @@ def run_pipeline(
     matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If no matches above threshold and we used open web search, try fallback to cropped face
-    if not matches and not target:
+    if not matches and not target and not handle:
         cropped = fp.get_face_crop(image_path_obj, margin=0.35)
         if cropped is not None:
             _info("No candidates above threshold with original image.")
@@ -360,12 +406,14 @@ def run_pipeline(
                         pass
 
     # If still no matches above threshold and engine allows, try Yandex fallback
-    if not matches and not target and engine in ("all", "yandex"):
+    if not matches and not target and not handle and engine in ("all", "yandex"):
         _info("No candidates above threshold with Google Lens.")
         _info("Searching Yandex Images (deep social/facial reverse search)...")
         print()
         from app.search import YandexProvider
         try:
+            from app.config import require_search_config
+            api_key = require_search_config()
             yandex_provider = YandexProvider(api_key=api_key)
             yandex_res = yandex_provider.search(str(image_path_obj))
             if yandex_res.candidates:
@@ -380,7 +428,7 @@ def run_pipeline(
             _info(f"Yandex search skipped: {e}")
 
     # If still no matches above threshold and not targeted, activate Associate Forensics Graph
-    if not matches and not target:
+    if not matches and not target and not handle:
         _info("Visual reverse search yielded 0 direct hits.")
         _info("Activating Associate Forensics Graph (Network Pivoting)...")
         print()
@@ -392,6 +440,9 @@ def run_pipeline(
             if assoc_contexts:
                 _info(f"Context tags: {', '.join(assoc_contexts[:3])}")
             try:
+                if not api_key:
+                    from app.config import require_search_config
+                    api_key = require_search_config()
                 li_provider = LinkedInPostProvider(api_key=api_key)
                 li_res = li_provider.search_leads(names=assoc_names, contexts=assoc_contexts)
                 if li_res.candidates:
@@ -472,9 +523,12 @@ def run_pipeline(
         "platform": content.platform,
         "title": content.title,
         "text": content.text,
+        "author": getattr(content, "author", "") or "",
         "image_hash": image_hash,
         "retrieved_at": content.retrieved_at,
     }
+    if getattr(content, "author", None) and "match" in record:
+        record["match"]["author"] = content.author
 
     # ==================================================================
     # [5/7] FINGERPRINT
@@ -625,7 +679,7 @@ def main() -> None:
         "--user",
         type=str,
         default=None,
-        help="Optional: search a specific user's public Twitter/X timeline for candidate posts without specifying post URL.",
+        help="Optional: search a specific user's public profile and posts on Instagram and/or X/Twitter (filter with --platform instagram or --platform twitter).",
     )
     parser.add_argument(
         "--engine",
