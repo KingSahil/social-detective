@@ -498,6 +498,49 @@ class HeadlessLensProvider(SearchProvider):
         import shutil
         self._chromium_executable = os.getenv("CHROMIUM_PATH") or shutil.which("chromium") or shutil.which("google-chrome") or shutil.which("google-chrome-stable") or ""
 
+    @staticmethod
+    def _make_full_photo_vsint(width: int, height: int) -> str:
+        """
+        Encode Google Lens protobuf vsint parameter requesting 100% full photo bounds:
+        y1=0.0, x1=0.0, y2=1.0, x2=1.0.
+        """
+        import base64
+        import struct
+
+        sub1 = (
+            b'\r' + struct.pack('<f', 0.0) +
+            b'\x15' + struct.pack('<f', 0.0) +
+            b'\x1d' + struct.pack('<f', 1.0) +
+            b'%' + struct.pack('<f', 1.0) +
+            b'0\x01'
+        )
+
+        def encode_varint(v: int) -> bytes:
+            res = bytearray()
+            while True:
+                b = v & 0x7F
+                v >>= 7
+                if v:
+                    res.append(b | 0x80)
+                else:
+                    res.append(b)
+                    break
+            return bytes(res)
+
+        tag7_content = (
+            b'\n' + encode_varint(len(sub1)) + sub1 +
+            b'\x10' + encode_varint(width) +
+            b'\x18' + encode_varint(height) +
+            b'%\x00\x00\x80?'
+        )
+
+        raw = (
+            b'\x08\x02' +
+            b'*\x0c\n\x02\x08\x07\x12\x02\x08\n\x18\x01 \x01' +
+            b':' + encode_varint(len(tag7_content)) + tag7_content
+        )
+        return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
     def search(self, image_path: str | Path) -> SearchResult:
         image_path = Path(image_path).resolve()
         if not image_path.exists():
@@ -506,6 +549,14 @@ class HeadlessLensProvider(SearchProvider):
         timestamp = datetime.now(timezone.utc).isoformat()
         candidates: list[Candidate] = []
         raw_info: dict = {"image": str(image_path)}
+
+        # Determine image dimensions for full-photo bounds
+        try:
+            from PIL import Image
+            with Image.open(image_path) as im:
+                img_width, img_height = im.size
+        except Exception:
+            img_width, img_height = 1080, 1080
 
         # 1. Upload directly to Google Lens v3 upload endpoint to get search Location URL
         # This completely bypasses Google's in-page bot detection and captcha triggers!
@@ -530,6 +581,9 @@ class HeadlessLensProvider(SearchProvider):
                     timeout=self.timeout,
                 )
             location = resp.headers.get("Location")
+            if location and "vsint=" in location:
+                full_vsint = self._make_full_photo_vsint(img_width, img_height)
+                location = re.sub(r'vsint=[^&]+', f'vsint={full_vsint}', location)
         except Exception as e:
             raw_info["upload_error"] = str(e)
 
@@ -580,9 +634,59 @@ class HeadlessLensProvider(SearchProvider):
 
                     page.goto(location, wait_until="load", timeout=int(self.timeout * 1000))
                     try:
-                        page.wait_for_selector("div[data-item-id], [jsname], script", timeout=3000)
+                        page.wait_for_selector("div[data-item-id], [jsname], script, img", timeout=3000)
                     except Exception:
                         pass
+
+                    # Readjust search crop area if Google Lens auto-contracted onto a sub-object
+                    try:
+                        boxes = page.evaluate("""() => {
+                            const img = document.querySelector('img.fHp7ze') || document.querySelector('div.UNBEIe img') || document.querySelector('img[src^="data:image"]') || document.querySelector('img');
+                            const tl = document.querySelector('div.pklMG.h1wbAd') || document.querySelector('[aria-label*="Top-left corner"]');
+                            const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
+                            if (!img || !tl || !br) return null;
+
+                            const tlAria = tl.getAttribute('aria-label') || '';
+                            const brAria = br.getAttribute('aria-label') || '';
+                            const isContracted = (!tlAria.includes('left 0%') || !tlAria.includes('top 0%') ||
+                                                  !brAria.includes('right 100%') || !brAria.includes('bottom 100%'));
+
+                            const ib = img.getBoundingClientRect();
+                            const tlb = tl.getBoundingClientRect();
+                            const brb = br.getBoundingClientRect();
+                            return {
+                                isContracted: isContracted,
+                                img: { x: ib.x, y: ib.y, width: ib.width, height: ib.height },
+                                tl: { x: tlb.x + tlb.width / 2, y: tlb.y + tlb.height / 2 },
+                                br: { x: brb.x + brb.width / 2, y: brb.y + brb.height / 2 }
+                            };
+                        }""")
+
+                        if boxes and boxes.get('isContracted'):
+                            img_box = boxes['img']
+                            # Drag top-left handle outward to full photo edge (0%, 0%)
+                            page.mouse.move(boxes['tl']['x'], boxes['tl']['y'])
+                            page.mouse.down()
+                            page.mouse.move(img_box['x'] - 15, img_box['y'] - 15, steps=8)
+                            page.mouse.up()
+                            time.sleep(0.3)
+
+                            # Re-fetch bottom-right handle and drag outward to full photo edge (100%, 100%)
+                            br_pos = page.evaluate("""() => {
+                                const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
+                                if (!br) return null;
+                                const b = br.getBoundingClientRect();
+                                return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+                            }""")
+                            if br_pos:
+                                page.mouse.move(br_pos['x'], br_pos['y'])
+                                page.mouse.down()
+                                page.mouse.move(img_box['x'] + img_box['width'] + 15, img_box['y'] + img_box['height'] + 15, steps=8)
+                                page.mouse.up()
+                                time.sleep(2.0)
+                    except Exception:
+                        pass
+
                     page.evaluate("window.scrollTo(0, 1500)")
                     time.sleep(0.5)
 
@@ -590,20 +694,42 @@ class HeadlessLensProvider(SearchProvider):
                     raw_info["final_url"] = page.url
                     context.close()
 
-                # 3. Parse Google Lens Visual Matches from embedded JSON
+                # 3. Parse Google Lens Visual Matches from data-im and embedded JSON
+                import html as html_lib
+                unescaped_html = html_lib.unescape(html)
+
                 def clean_str(s: str) -> str:
                     s = s.replace(r"\u003d", "=").replace(r"\u0026", "&").replace(r"\/", "/")
                     s = s.replace(r"\u003c", "<").replace(r"\u003e", ">")
                     return s
 
-                pattern = re.compile(
+                seen: set[str] = set()
+                from urllib.parse import urlparse
+
+                # Pattern A: Dynamic cards in data-im (populated after readjustment)
+                pattern_data_im = re.compile(
+                    r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*\{"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"'
+                )
+                for m in pattern_data_im.finditer(unescaped_html):
+                    orig_img = clean_str(m.group(1))
+                    source_url = clean_str(m.group(4))
+                    title = clean_str(m.group(5))
+                    domain = urlparse(source_url).netloc
+                    if source_url not in seen:
+                        seen.add(source_url)
+                        candidates.append(Candidate(
+                            image_url=orig_img,
+                            source_url=source_url,
+                            title=title,
+                            domain=domain,
+                        ))
+
+                # Pattern B: Embedded initial SSR JSON script tags
+                pattern_ssr = re.compile(
                     r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*null,\s*\d+,\s*\{[^}]*"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"',
                     re.DOTALL
                 )
-
-                seen: set[str] = set()
-                from urllib.parse import urlparse
-                for m in pattern.finditer(html):
+                for m in pattern_ssr.finditer(unescaped_html):
                     orig_img = clean_str(m.group(1))
                     source_url = clean_str(m.group(4))
                     title = clean_str(m.group(5))
