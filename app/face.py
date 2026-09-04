@@ -26,14 +26,14 @@ class FaceProcessingError(Exception):
 class FaceProcessor:
     """Detect faces and compute ArcFace embeddings via InsightFace."""
 
-    def __init__(self, model_name: str = "buffalo_l", ctx_id: int = -1):
+    def __init__(self, model_name: str = "buffalo_l", ctx_id: int = 0):
         """
         Parameters
         ----------
         model_name : str
             InsightFace model pack name (default ``buffalo_l``).
         ctx_id : int
-            ONNX Runtime execution provider.  -1 = CPU, 0 = GPU:0.
+            Execution context.  0 = GPU:0 (with CPU fallback), -1 = CPU only.
         """
         import os
         import warnings
@@ -51,12 +51,48 @@ class FaceProcessor:
             print("    Run: pip install insightface onnxruntime opencv-python\n")
             sys.exit(1)
 
-        # Suppress ONNX runtime/model load logs during prepare
+        # The pipeline only uses detection + recognition (512-d embeddings).
+        # genderage/landmark3d/2d106det models are never consumed — skip them.
+        allowed = ["detection", "recognition"]
+
+        # Prefer GPU (CUDA EP) for ~9x faster embedding; silently fall back
+        # to CPU-only when onnxruntime-gpu is absent or the GPU is unusable.
+        # FACE_DEVICE=cpu|auto (default auto) forces the CPU path.
+        import os as _os
+        device_pref = _os.getenv("FACE_DEVICE", "auto").strip().lower()
+        providers = None
+        try:
+            import onnxruntime as _ort
+            if (
+                device_pref != "cpu"
+                and "CUDAExecutionProvider" in _ort.get_available_providers()
+            ):
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        except Exception:
+            providers = None
+
         import contextlib
         with open(os.devnull, "w") as devnull:
             with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                self._app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
-                self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+                if providers is not None:
+                    try:
+                        self._app = FaceAnalysis(
+                            name=model_name,
+                            allowed_modules=allowed,
+                            providers=providers,
+                        )
+                        self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+                    except Exception:
+                        # GPU session creation failed (driver/VRAM) — degrade to CPU
+                        providers = None
+                if providers is None:
+                    self._app = FaceAnalysis(
+                        name=model_name,
+                        allowed_modules=allowed,
+                        providers=["CPUExecutionProvider"],
+                    )
+                    self._app.prepare(ctx_id=-1, det_size=(640, 640))
+        self.using_gpu = providers is not None
 
     # ------------------------------------------------------------------
     # Public API

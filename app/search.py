@@ -164,18 +164,40 @@ class SerpAPIProvider(SearchProvider):
         client = serpapi_mod.Client(api_key=self._api_key)
 
         # Step 1: Sanitize and upload local image to get a temporary image_id
+        # SerpApi's Image API rejects files >500KB, so re-encode any file that
+        # is not already a small-enough baseline JPEG (not just non-JPEG input).
         upload_path = str(image_path)
         temp_upload_file = None
         try:
+            import os as _os
             from PIL import Image
-            with Image.open(str(image_path)) as im:
-                if im.format != "JPEG" or im.mode != "RGB":
-                    import tempfile
+            needs_reencode = True
+            try:
+                if _os.path.getsize(upload_path) <= 500_000:
+                    with Image.open(upload_path) as _im_chk:
+                        if _im_chk.format == "JPEG" and _im_chk.mode == "RGB":
+                            needs_reencode = False
+            except Exception:
+                needs_reencode = True
+            if needs_reencode:
+                import tempfile
+                with Image.open(str(image_path)) as im:
+                    rgb = im.convert("RGB")
                     tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                     temp_upload_file = tmp.name
                     tmp.close()
-                    im.convert("RGB").save(temp_upload_file, "JPEG", quality=95)
-                    upload_path = temp_upload_file
+                    quality = 92
+                    while quality >= 30:
+                        rgb.save(temp_upload_file, "JPEG", quality=quality)
+                        if _os.path.getsize(temp_upload_file) <= 500_000:
+                            break
+                        quality -= 10
+                    if _os.path.getsize(temp_upload_file) > 500_000:
+                        # Quality floor reached; halve resolution and retry once
+                        w, h = rgb.size
+                        rgb = rgb.resize((max(1, w // 2), max(1, h // 2)))
+                        rgb.save(temp_upload_file, "JPEG", quality=85)
+                upload_path = temp_upload_file
         except Exception:
             pass
 
@@ -185,10 +207,27 @@ class SerpAPIProvider(SearchProvider):
         try:
             for attempt in range(3):
                 try:
-                    upload_result = client.upload_image(upload_path)
+                    # POST the image directly to SerpApi's Image API
+                    # (wire format identical to serpapi>=1.1.0 client.upload_image,
+                    #  which is unavailable in serpapi 1.0.x)
+                    with open(upload_path, "rb") as img_f:
+                        resp_up = requests.post(
+                            "https://serpapi.com/image",
+                            data={"api_key": self._api_key},
+                            files={"image": ("image.jpg", img_f, "image/jpeg")},
+                            timeout=30,
+                        )
+                    if resp_up.status_code == 429 and attempt < 2:
+                        time.sleep(2.0 * (attempt + 1))
+                        continue
+                    resp_up.raise_for_status()
+                    upload_result = resp_up.json()
                     image_id = upload_result.get("image_id")
                     if image_id:
                         break
+                    raise RuntimeError(f"Upload succeeded but no image_id returned: {upload_result}")
+                except RuntimeError:
+                    raise
                 except Exception as e:
                     if "429" in str(e) and attempt < 2:
                         time.sleep(2.0 * (attempt + 1))
@@ -453,6 +492,11 @@ class HeadlessLensProvider(SearchProvider):
         else:
             self.user_data_dir = Path(user_data_dir).resolve()
         self.fallback_on_captcha = fallback_on_captcha
+        # Resolve a real Chrome/Chromium binary for Playwright.
+        # channel="chrome" only finds Google Chrome; on distros with only
+        # Chromium (e.g. Arch), point Playwright at the system binary instead.
+        import shutil
+        self._chromium_executable = os.getenv("CHROMIUM_PATH") or shutil.which("chromium") or shutil.which("google-chrome") or shutil.which("google-chrome-stable") or ""
 
     def search(self, image_path: str | Path) -> SearchResult:
         image_path = Path(image_path).resolve()
@@ -508,10 +552,15 @@ class HeadlessLensProvider(SearchProvider):
                     args.extend(["--window-position=-2400,-2400", "--window-size=1920,1080"])
 
                 with sync_playwright() as p:
+                    launch_kwargs = {}
+                    if self._chromium_executable:
+                        launch_kwargs["executable_path"] = self._chromium_executable
+                    else:
+                        launch_kwargs["channel"] = "chrome"
                     context = p.chromium.launch_persistent_context(
                         user_data_dir=str(self.user_data_dir),
-                        channel="chrome",
-                        headless=False if self.headless else False,
+                        **launch_kwargs,
+                        headless=False,
                         ignore_default_args=["--enable-automation"],
                         args=args,
                         viewport={"width": 1920, "height": 1080},

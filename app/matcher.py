@@ -46,6 +46,16 @@ class FaceMatcher:
     def __init__(self, face_processor: FaceProcessor, timeout: int = 15):
         self._fp = face_processor
         self._timeout = timeout
+        # Shared keep-alive session: candidate images often come from the same
+        # CDN hosts; reusing connections avoids a fresh TCP+TLS handshake each.
+        self._http = requests.Session()
+        self._http.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        })
 
     def match_and_rank(
         self,
@@ -55,19 +65,49 @@ class FaceMatcher:
         """
         For each candidate, download the image, extract a face embedding,
         and compute cosine similarity. Returns all results sorted by similarity (descending).
+
+        Candidates sharing the same image URL are downloaded and embedded
+        once; the result is fanned out to every duplicate.
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        results: list[MatchResult] = []
+        # Deduplicate by image URL (empty URLs get a unique key)
+        unique: dict[str, Candidate] = {}
+        keys: list[str] = []
+        for c in candidates:
+            k = (c.image_url or "").strip() or f"__idx_{id(c)}"
+            unique[k] = c
+            keys.append(k)
 
-        def _worker(cand: Candidate) -> Optional[MatchResult]:
-            return self._process_candidate(query_embedding, cand)
+        def _worker(item) -> tuple[str, Optional[MatchResult]]:
+            k, cand = item
+            return k, self._process_candidate(query_embedding, cand)
 
-        max_workers = min(20, max(1, len(candidates)))
+        results_by_key: dict[str, MatchResult] = {}
+        items = list(unique.items())
+        max_workers = min(20, max(1, len(items)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for result in executor.map(_worker, candidates):
+            for k, result in executor.map(_worker, items):
                 if result is not None:
-                    results.append(result)
+                    results_by_key[k] = result
+
+        # Fan unique results back out to every candidate (duplicates share
+        # the MatchResult outcome but keep their own candidate object).
+        results: list[MatchResult] = []
+        for cand, k in zip(candidates, keys):
+            r = results_by_key.get(k)
+            if r is None:
+                results.append(MatchResult(
+                    candidate=cand, similarity=0.0,
+                    face_detected=False, error="not processed",
+                ))
+            elif r.candidate is cand:
+                results.append(r)
+            else:
+                results.append(MatchResult(
+                    candidate=cand, similarity=r.similarity,
+                    face_detected=r.face_detected, error=r.error,
+                ))
 
         # Sort by similarity descending
         results.sort(key=lambda r: r.similarity, reverse=True)
@@ -155,14 +195,7 @@ class FaceMatcher:
     def _download_image(self, url: str) -> Optional[np.ndarray]:
         """Download an image URL and decode it as a BGR numpy array."""
         try:
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            }
-            resp = requests.get(url, timeout=min(5.0, self._timeout), headers=headers)
+            resp = self._http.get(url, timeout=min(5.0, self._timeout))
             resp.raise_for_status()
             data = resp.content
             # Decode with OpenCV

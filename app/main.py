@@ -106,6 +106,13 @@ def run_pipeline(
     record: dict = {}
     total_steps = 7
 
+    import time as _time
+    _t0 = _time.perf_counter()
+    _phase_marks: list[tuple[str, float]] = []
+
+    def _mark(name: str) -> None:
+        _phase_marks.append((name, _time.perf_counter() - _t0))
+
     # ==================================================================
     # [1/7] FACE DETECTION
     # ==================================================================
@@ -129,6 +136,7 @@ def run_pipeline(
 
     _ok("Face detected")
     _ok(f"Face embedding generated ({query_embedding.shape[0]}-d)")
+    _mark("face_detect")
     print()
 
     record["query"] = {
@@ -393,6 +401,8 @@ def run_pipeline(
             "platforms": discovered_platforms,
         }
 
+    _mark("search")
+
     # ==================================================================
     # [3/7] FACE MATCHING
     # ==================================================================
@@ -595,6 +605,7 @@ def run_pipeline(
         "domain": best.candidate.domain,
         "title": best.candidate.title,
     }
+    _mark("matching")
 
     # ==================================================================
     # [4/7] CONTENT RETRIEVAL
@@ -637,6 +648,7 @@ def run_pipeline(
     }
     if getattr(content, "author", None) and "match" in record:
         record["match"]["author"] = content.author
+    _mark("content")
 
     # ==================================================================
     # [5/7] FINGERPRINT
@@ -680,6 +692,7 @@ def run_pipeline(
 
     source_id = content.platform or ""
     tx = bc.register_hash(content_hash, source_id)
+    _mark("blockchain")
 
     if tx.status == "confirmed":
         _ok("Transaction confirmed")
@@ -744,6 +757,16 @@ def run_pipeline(
     print(f"  Record saved:")
     print(f"  {C_CYAN}{record_path}{C_RESET}")
     print()
+    print("=" * 60)
+    print()
+
+    total_s = _time.perf_counter() - _t0
+    print("  Timing (cumulative):")
+    _prev = 0.0
+    for name, t in _phase_marks:
+        print(f"    {name:<12} +{t - _prev:6.2f}s  (t={t:6.2f}s)")
+        _prev = t
+    print(f"    {'total':<12} {total_s:6.2f}s")
     print("=" * 60)
     print()
 
