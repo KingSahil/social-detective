@@ -599,6 +599,16 @@ class HeadlessLensProvider(SearchProvider):
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-infobars",
+                    "--disable-extensions",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-background-networking",
+                    "--disable-breakpad",
+                    "--disable-component-update",
+                    "--no-first-run",
                 ]
                 if self.headless:
                     # Offscreen coordinates ensure the window is invisible while running
@@ -621,6 +631,17 @@ class HeadlessLensProvider(SearchProvider):
                     )
                     page = context.pages[0] if context.pages else context.new_page()
 
+                    # Block fonts and media to significantly accelerate page navigation
+                    try:
+                        page.route(
+                            "**/*",
+                            lambda route: route.abort()
+                            if route.request.resource_type in ["font", "media"]
+                            else route.continue_(),
+                        )
+                    except Exception:
+                        pass
+
                     cookies_to_add = []
                     for c in session.cookies:
                         cookies_to_add.append({
@@ -632,9 +653,9 @@ class HeadlessLensProvider(SearchProvider):
                     if cookies_to_add:
                         context.add_cookies(cookies_to_add)
 
-                    page.goto(location, wait_until="load", timeout=int(self.timeout * 1000))
+                    page.goto(location, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
                     try:
-                        page.wait_for_selector("div[data-item-id], [jsname], script, img", timeout=3000)
+                        page.wait_for_selector("div[data-item-id], [jsname], script, img", timeout=1200)
                     except Exception:
                         pass
 
@@ -664,14 +685,14 @@ class HeadlessLensProvider(SearchProvider):
 
                         if boxes and boxes.get('isContracted'):
                             img_box = boxes['img']
-                            # Drag top-left handle outward to full photo edge (0%, 0%)
+                            # Fast drag top-left handle outward to full photo edge (0%, 0%)
                             page.mouse.move(boxes['tl']['x'], boxes['tl']['y'])
                             page.mouse.down()
-                            page.mouse.move(img_box['x'] - 15, img_box['y'] - 15, steps=8)
+                            page.mouse.move(img_box['x'] - 15, img_box['y'] - 15, steps=2)
                             page.mouse.up()
-                            time.sleep(0.3)
+                            time.sleep(0.1)
 
-                            # Re-fetch bottom-right handle and drag outward to full photo edge (100%, 100%)
+                            # Fast drag bottom-right handle outward to full photo edge (100%, 100%)
                             br_pos = page.evaluate("""() => {
                                 const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
                                 if (!br) return null;
@@ -681,14 +702,14 @@ class HeadlessLensProvider(SearchProvider):
                             if br_pos:
                                 page.mouse.move(br_pos['x'], br_pos['y'])
                                 page.mouse.down()
-                                page.mouse.move(img_box['x'] + img_box['width'] + 15, img_box['y'] + img_box['height'] + 15, steps=8)
+                                page.mouse.move(img_box['x'] + img_box['width'] + 15, img_box['y'] + img_box['height'] + 15, steps=2)
                                 page.mouse.up()
-                                time.sleep(2.0)
+                                time.sleep(0.8)
                     except Exception:
                         pass
 
                     page.evaluate("window.scrollTo(0, 1500)")
-                    time.sleep(0.5)
+                    time.sleep(0.2)
 
                     html = page.content()
                     raw_info["final_url"] = page.url
@@ -777,28 +798,46 @@ class FreeMultiEngineSearchProvider(SearchProvider):
     """
     Combined visual reverse search provider:
     Orchestrates Headless Google Lens with Direct Yandex Visual Search
-    and DuckDuckGo social OSINT correlation without requiring any paid API keys.
+    concurrently in parallel without requiring any paid API keys.
     """
     PROVIDER_NAME = "Free Multi-Engine Visual Search"
 
     def __init__(self, headless: bool = True, timeout: float = 25.0):
-        self.lens = HeadlessLensProvider(headless=headless, timeout=timeout, fallback_on_captcha=True)
+        self.lens = HeadlessLensProvider(headless=headless, timeout=timeout, fallback_on_captcha=False)
         self.yandex = DirectYandexProvider(timeout=timeout)
 
     def search(self, image_path: str | Path) -> SearchResult:
-        res = self.lens.search(image_path)
-        if len(res.candidates) < 5:
+        from concurrent.futures import ThreadPoolExecutor
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_lens = pool.submit(self.lens.search, image_path)
+            fut_yandex = pool.submit(self.yandex.search, image_path)
+
             try:
-                y_res = self.yandex.search(image_path)
-                existing_urls = {c.image_url for c in res.candidates}
-                for c in y_res.candidates:
-                    if c.image_url not in existing_urls:
-                        res.candidates.append(c)
-                        existing_urls.add(c.image_url)
+                res_lens = fut_lens.result()
             except Exception:
-                pass
-        res.candidates = filter_and_prioritize_candidates(res.candidates)
-        return res
+                res_lens = SearchResult(candidates=[], provider=self.lens.PROVIDER_NAME)
+
+            try:
+                res_yandex = fut_yandex.result()
+            except Exception:
+                res_yandex = SearchResult(candidates=[], provider=self.yandex.PROVIDER_NAME)
+
+        combined: list[Candidate] = []
+        seen_urls: set[str] = set()
+        for c in (res_lens.candidates + res_yandex.candidates):
+            if c.source_url not in seen_urls:
+                seen_urls.add(c.source_url)
+                combined.append(c)
+
+        filtered = filter_and_prioritize_candidates(combined)
+        return SearchResult(
+            candidates=filtered,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={"lens": res_lens.raw_response, "yandex": res_yandex.raw_response},
+        )
 
 
 # ---------------------------------------------------------------------------

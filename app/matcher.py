@@ -49,6 +49,9 @@ class FaceMatcher:
         # Shared keep-alive session: candidate images often come from the same
         # CDN hosts; reusing connections avoids a fresh TCP+TLS handshake each.
         self._http = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25)
+        self._http.mount("https://", adapter)
+        self._http.mount("http://", adapter)
         self._http.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

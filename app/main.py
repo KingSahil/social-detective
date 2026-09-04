@@ -113,6 +113,46 @@ def run_pipeline(
     def _mark(name: str) -> None:
         _phase_marks.append((name, _time.perf_counter() - _t0))
 
+    # Pre-launch web search concurrently with Face Detection to maximize pipeline parallelism
+    from concurrent.futures import ThreadPoolExecutor
+    search_executor = ThreadPoolExecutor(max_workers=1)
+    search_future = None
+    prelaunched_search_provider = None
+
+    if not target and not handle:
+        from app.config import require_search_config, LENS_HEADLESS
+        from app.search import (
+            HeadlessLensProvider,
+            DirectYandexProvider,
+            FreeMultiEngineSearchProvider,
+            SerpAPIProvider,
+            YandexProvider,
+        )
+        api_key = require_search_config(optional=True)
+        headless = (not lens_visible) and LENS_HEADLESS
+
+        if engine == "serpapi":
+            if not api_key:
+                _fatal("SERPAPI_KEY is not configured but required for --engine serpapi.")
+            prelaunched_search_provider = SerpAPIProvider(api_key=api_key)
+        elif engine == "yandex":
+            if api_key:
+                prelaunched_search_provider = YandexProvider(api_key=api_key)
+            else:
+                prelaunched_search_provider = DirectYandexProvider()
+        elif engine == "lens":
+            if api_key:
+                prelaunched_search_provider = SerpAPIProvider(api_key=api_key)
+            else:
+                prelaunched_search_provider = HeadlessLensProvider(headless=headless, fallback_on_captcha=True)
+        else:  # "all" - default: SerpAPI Google Lens primary, free multi-engine fallback
+            if api_key:
+                prelaunched_search_provider = SerpAPIProvider(api_key=api_key)
+            else:
+                prelaunched_search_provider = FreeMultiEngineSearchProvider(headless=headless)
+
+        search_future = search_executor.submit(prelaunched_search_provider.search, str(image_path_obj))
+
     # ==================================================================
     # [1/7] FACE DETECTION
     # ==================================================================
@@ -284,33 +324,36 @@ def run_pipeline(
         headless = (not lens_visible) and LENS_HEADLESS
 
         # Primary Search Provider configuration
-        # SerpAPI is primary when an API key is configured or explicitly requested
-        search_provider = None
-        if engine == "serpapi":
-            if not api_key:
-                _fatal("SERPAPI_KEY is not configured but required for --engine serpapi.")
-            search_provider = SerpAPIProvider(api_key=api_key)
-        elif engine == "yandex":
-            if api_key:
-                search_provider = YandexProvider(api_key=api_key)
-            else:
-                search_provider = DirectYandexProvider()
-        elif engine == "lens":
-            if api_key:
+        search_provider = prelaunched_search_provider
+        if search_provider is None:
+            if engine == "serpapi":
+                if not api_key:
+                    _fatal("SERPAPI_KEY is not configured but required for --engine serpapi.")
                 search_provider = SerpAPIProvider(api_key=api_key)
-            else:
-                search_provider = HeadlessLensProvider(headless=headless, fallback_on_captcha=True)
-        else:  # "all" - default: SerpAPI Google Lens primary, free multi-engine fallback
-            if api_key:
-                search_provider = SerpAPIProvider(api_key=api_key)
-            else:
-                search_provider = FreeMultiEngineSearchProvider(headless=headless)
+            elif engine == "yandex":
+                if api_key:
+                    search_provider = YandexProvider(api_key=api_key)
+                else:
+                    search_provider = DirectYandexProvider()
+            elif engine == "lens":
+                if api_key:
+                    search_provider = SerpAPIProvider(api_key=api_key)
+                else:
+                    search_provider = HeadlessLensProvider(headless=headless, fallback_on_captcha=True)
+            else:  # "all" - default: SerpAPI Google Lens primary, free multi-engine fallback
+                if api_key:
+                    search_provider = SerpAPIProvider(api_key=api_key)
+                else:
+                    search_provider = FreeMultiEngineSearchProvider(headless=headless)
 
         _info(f"Provider: {search_provider.PROVIDER_NAME}")
         _info("Searching...")
 
         try:
-            search_result = search_provider.search(str(image_path_obj))
+            if search_future is not None:
+                search_result = search_future.result()
+            else:
+                search_result = search_provider.search(str(image_path_obj))
             candidate_count = len(search_result.candidates)
             _ok("Search completed")
             _ok(f"{candidate_count} candidates discovered across the web")
@@ -465,8 +508,8 @@ def run_pipeline(
                     except OSError:
                         pass
 
-    # If still no matches above threshold and engine allows, try Yandex fallback
-    if not matches and not target and not handle and engine in ("all", "yandex"):
+    # If still no matches above threshold and engine allows, try Yandex fallback (skip if already run in multi-engine)
+    if not matches and not target and not handle and engine in ("all", "yandex") and not isinstance(search_provider, FreeMultiEngineSearchProvider):
         _info("No candidates above threshold with primary visual search.")
         _info("Searching Yandex Images (deep social/facial reverse search)...")
         print()
