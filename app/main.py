@@ -273,6 +273,8 @@ def run_pipeline(
             SearchResult,
             extract_social_handles,
             find_social_handles_from_subject_memory,
+            find_subject_memory_leads,
+            search_web_leads,
         )
         from app.matcher import FaceMatcher
         import tempfile
@@ -497,56 +499,81 @@ def run_pipeline(
                 all_matches = y_matches
                 matches = [m for m in all_matches if m.similarity >= threshold]
 
-    # If still no matches above threshold, activate Cross-Platform OSINT Social Pivot
+    # If still no matches above threshold, activate Cross-Platform OSINT Social Pivot & Identity Memory
     if not matches and not target and not handle:
         _info("No candidates above threshold with visual search.")
         _info("Activating cross-platform OSINT social pivot & identity memory...")
         discovered_handles = set(extract_social_handles(search_result.candidates))
-        recalled_handles = set(find_social_handles_from_subject_memory(query_embedding, fp=fp))
-        all_pivot_handles = sorted(recalled_handles) + [h for h in sorted(discovered_handles) if h not in recalled_handles][:3]
+        recalled_handles_list, memory_candidates = find_subject_memory_leads(query_embedding, fp=fp)
+        recalled_handles = set(recalled_handles_list)
 
-        if all_pivot_handles:
-            _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles])}")
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 1. Immediately evaluate known verified appearances from subject identity memory
+        if memory_candidates:
+            _ok(f"Correlating with {len(memory_candidates)} verified appearance candidate(s) from subject memory")
+            mem_matches = matcher.match_and_rank(query_embedding, memory_candidates)
+            if mem_matches:
+                all_matches = sorted(all_matches + mem_matches, key=lambda r: r.similarity, reverse=True)
+                matches = [m for m in all_matches if m.similarity >= threshold]
 
-            def _fetch_tw(h: str):
-                try:
-                    tw_prov = TwitterProfileProvider(h)
-                    return h, tw_prov.search()
-                except Exception:
-                    return h, None
+        # 2. Correlate across discovered and recalled social/web handles
+        if not matches:
+            all_pivot_handles = sorted(recalled_handles) + [h for h in sorted(discovered_handles) if h not in recalled_handles][:3]
 
-            def _fetch_ig():
-                try:
-                    ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
-                    from app.search import extract_associate_network_leads
-                    _, contexts = extract_associate_network_leads()
-                    return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
-                except Exception:
-                    return None
+            if all_pivot_handles:
+                _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles])}")
+                from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            new_pivot_candidates = []
-            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 1, 6)) as pool:
-                futures = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
-                ig_fut = pool.submit(_fetch_ig)
+                def _fetch_tw(h: str):
+                    try:
+                        tw_prov = TwitterProfileProvider(h)
+                        return h, tw_prov.search()
+                    except Exception:
+                        return h, None
 
-                for fut in as_completed(futures):
-                    h, tw_res = fut.result()
-                    if tw_res and tw_res.candidates:
-                        new_pivot_candidates.extend(tw_res.candidates)
-                        _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
+                def _fetch_ig():
+                    try:
+                        ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
+                        from app.search import extract_associate_network_leads
+                        _, contexts = extract_associate_network_leads()
+                        return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
+                    except Exception:
+                        return None
 
-                ig_res = ig_fut.result()
-                if ig_res and ig_res.candidates:
-                    new_pivot_candidates.extend(ig_res.candidates)
-                    _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+                def _fetch_web(h: str):
+                    try:
+                        return h, search_web_leads(h, max_results=4)
+                    except Exception:
+                        return h, []
 
-            if new_pivot_candidates:
-                _info("Analyzing social pivot candidate similarity...")
-                pivot_matches = matcher.match_and_rank(query_embedding, new_pivot_candidates)
-                if pivot_matches:
-                    all_matches = sorted(all_matches + pivot_matches, key=lambda r: r.similarity, reverse=True)
-                    matches = [m for m in all_matches if m.similarity >= threshold]
+                new_pivot_candidates = []
+                with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) * 2 + 1, 8)) as pool:
+                    futures_tw = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
+                    futures_web = {pool.submit(_fetch_web, h): h for h in all_pivot_handles}
+                    ig_fut = pool.submit(_fetch_ig)
+
+                    for fut in as_completed(futures_tw):
+                        h, tw_res = fut.result()
+                        if tw_res and tw_res.candidates:
+                            new_pivot_candidates.extend(tw_res.candidates)
+                            _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
+
+                    for fut in as_completed(futures_web):
+                        h, web_res = fut.result()
+                        if web_res:
+                            new_pivot_candidates.extend(web_res)
+                            _ok(f"Extracted {len(web_res)} candidate(s) from web OSINT pivot on @{h}")
+
+                    ig_res = ig_fut.result()
+                    if ig_res and ig_res.candidates:
+                        new_pivot_candidates.extend(ig_res.candidates)
+                        _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+
+                if new_pivot_candidates:
+                    _info("Analyzing social pivot candidate similarity...")
+                    pivot_matches = matcher.match_and_rank(query_embedding, new_pivot_candidates)
+                    if pivot_matches:
+                        all_matches = sorted(all_matches + pivot_matches, key=lambda r: r.similarity, reverse=True)
+                        matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If still no matches above threshold and not targeted, activate Associate Forensics Graph
     if not matches and not target and not handle:

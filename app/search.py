@@ -1142,22 +1142,24 @@ def extract_social_handles(candidates: list[Candidate]) -> list[str]:
 _MEMORY_EMB_CACHE: dict[str, np.ndarray] = {}
 
 
-def find_social_handles_from_subject_memory(
+def find_subject_memory_leads(
     query_embedding: np.ndarray,
     results_dir: str | Path = "data/results",
-    similarity_threshold: float = 0.58,
+    similarity_threshold: float = 0.65,
     fp: Any | None = None,
-) -> list[str]:
+) -> tuple[list[str], list[Candidate]]:
     """
     Forensics Identity Correlation:
     If an unindexed face matches a previously verified subject (>= similarity_threshold),
-    recalls that subject's known social handles, usernames, and profiles.
+    recalls that subject's known social handles AND past verified appearances.
     """
     results_path = Path(results_dir)
     if not results_path.exists():
-        return []
+        return [], []
 
     discovered_handles: set[str] = set()
+    recalled_candidates: list[Candidate] = []
+    seen_urls: set[str] = set()
 
     try:
         from app.matcher import cosine_similarity
@@ -1165,7 +1167,7 @@ def find_social_handles_from_subject_memory(
             from app.face import FaceProcessor
             fp = FaceProcessor()
     except Exception:
-        return []
+        return [], []
 
     cache_file = results_path / ".subject_embeddings.pkl"
     if cache_file.exists() and not _MEMORY_EMB_CACHE:
@@ -1177,6 +1179,11 @@ def find_social_handles_from_subject_memory(
             pass
 
     cache_updated = False
+    RESERVED = {
+        "posts", "reel", "reels", "p", "share", "explore", "home", "status",
+        "about", "login", "signup", "search", "hashtag", "direct", "stories",
+        "in", "pub", "feed", "jobs", "company", "intent", "i"
+    }
 
     for record_file in sorted(results_path.glob("*.json"), reverse=True):
         try:
@@ -1201,7 +1208,44 @@ def find_social_handles_from_subject_memory(
             sim = cosine_similarity(query_embedding, stored_emb)
 
             if sim >= similarity_threshold:
-                # Direct structured author/handle fields if present in record
+                # 1. Recall known verified appearances directly!
+                urls_to_inspect = []
+                for u in [
+                    data.get("match", {}).get("source_url"),
+                    data.get("content", {}).get("source_url"),
+                    data.get("search", {}).get("target_url"),
+                ]:
+                    if u and u not in seen_urls:
+                        urls_to_inspect.append(u)
+                        seen_urls.add(u)
+
+                # Direct verified image URLs
+                for img_u in [
+                    data.get("match", {}).get("image_url"),
+                    data.get("content", {}).get("image_url"),
+                ]:
+                    if img_u and img_u not in seen_urls:
+                        seen_urls.add(img_u)
+                        recalled_candidates.append(Candidate(
+                            image_url=img_u,
+                            source_url=data.get("match", {}).get("source_url") or img_u,
+                            title=data.get("match", {}).get("title") or "Verified Subject Appearance",
+                            domain=data.get("match", {}).get("domain") or "Verified Identity Memory",
+                        ))
+
+                for u in urls_to_inspect:
+                    try:
+                        tp = TargetURLProvider(u, timeout=8.0)
+                        t_res = tp.search()
+                        if t_res and t_res.candidates:
+                            for c in t_res.candidates:
+                                if c.image_url not in seen_urls:
+                                    seen_urls.add(c.image_url)
+                                    recalled_candidates.append(c)
+                    except Exception:
+                        pass
+
+                # 2. Extract social handles
                 for auth_field in [
                     data.get("match", {}).get("author"),
                     data.get("content", {}).get("author"),
@@ -1248,12 +1292,70 @@ def find_social_handles_from_subject_memory(
         except Exception:
             pass
 
-    RESERVED = {
-        "posts", "reel", "reels", "p", "share", "explore", "home", "status",
-        "about", "login", "signup", "search", "hashtag", "direct", "stories",
-        "in", "pub", "feed", "jobs", "company", "intent", "i"
+    clean_handles = [h for h in sorted(discovered_handles) if h not in RESERVED]
+    return clean_handles, recalled_candidates
+
+
+def find_social_handles_from_subject_memory(
+    query_embedding: np.ndarray,
+    results_dir: str | Path = "data/results",
+    similarity_threshold: float = 0.58,
+    fp: Any | None = None,
+) -> list[str]:
+    """Compatibility wrapper for returning only handles."""
+    handles, _ = find_subject_memory_leads(
+        query_embedding, results_dir=results_dir, similarity_threshold=similarity_threshold, fp=fp
+    )
+    return handles
+
+
+def search_web_leads(query: str, max_results: int = 5) -> list[Candidate]:
+    """
+    OSINT Web Pivot:
+    Searches DuckDuckGo for an identity handle or person name,
+    inspects the top candidate web pages (portfolios, projects, profiles),
+    and extracts candidate media images using TargetURLProvider.
+    """
+    from urllib.parse import urlparse
+    from ddgs import DDGS
+    candidates: list[Candidate] = []
+    seen_urls: set[str] = set()
+
+    clean_q = query.strip().lstrip("@")
+    if len(clean_q) < 3:
+        return []
+
+    q_str = f'"{clean_q}"' if (" " in clean_q or "-" in clean_q) else clean_q
+    try:
+        ddgs = DDGS()
+        results = list(ddgs.text(q_str, max_results=max_results))
+    except Exception:
+        results = []
+
+    SKIP_DOMAINS = {
+        "google.com", "bing.com", "yahoo.com", "duckduckgo.com",
+        "facebook.com", "instagram.com", "twitter.com", "x.com",
+        "youtube.com", "pinterest.com"
     }
-    return [h for h in sorted(discovered_handles) if h not in RESERVED]
+
+    for r in results:
+        href = r.get("href", "")
+        if not href or href in seen_urls:
+            continue
+        seen_urls.add(href)
+        domain = urlparse(href).netloc.lower()
+        if any(d in domain for d in SKIP_DOMAINS):
+            continue
+
+        try:
+            tp = TargetURLProvider(href, timeout=8.0)
+            t_res = tp.search()
+            if t_res and t_res.candidates:
+                candidates.extend(t_res.candidates)
+        except Exception:
+            continue
+
+    return candidates
 
 
 # ---------------------------------------------------------------------------
