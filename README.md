@@ -47,6 +47,12 @@ Query Image ➔ Face Detection ➔ ArcFace 512-d Vector ➔ Multi-Engine Web & S
      ➔ Ethereum Sepolia Notarization ➔ Cryptographic Verification & Tamper Detection
 ```
 
+<p align="center">
+  <img src="docs/assets/face_embedding_concept.jpg" alt="FaceTrace AI Face Embedding & Biometric Verification Pipeline" width="100%" style="border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);" />
+  <br>
+  <em>Figure 1: Mathematical transformation of facial geometry into normalized 512-dimensional ArcFace embeddings, cosine similarity matching, and cryptographic tamper-proof evidence sealing.</em>
+</p>
+
 ---
 
 ## 🏗 System Architecture
