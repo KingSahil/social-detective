@@ -10,6 +10,7 @@ from app.search import (
     MockSearchProvider,
     SerpAPIProvider,
     TargetURLProvider,
+    DirectYandexProvider,
 )
 from unittest.mock import patch, MagicMock
 
@@ -379,6 +380,96 @@ class TestTwitterProfileProvider:
         handles = extract_social_handles(candidates)
         assert "supreme__sahil" in handles
         assert "dev_expert" in handles
+
+
+class TestDirectYandexProvider:
+    @patch.object(DirectYandexProvider, "_upload_to_public_url")
+    @patch("requests.get")
+    def test_direct_yandex_search(self, mock_get, mock_upload, tmp_path):
+        dummy_img = tmp_path / "test.jpg"
+        dummy_img.write_text("fake")
+        mock_upload.return_value = "https://iili.io/fake123.jpg"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = """
+        <html><body>
+            <a href="/images/search?img_url=https%3A%2F%2Fexample.com%2Fprofile.jpg&rurl=https%3A%2F%2Flinkedin.com%2Fin%2Ftestuser">
+                LinkedIn Profile Test
+            </a>
+            <a href="/images/search?img_url=https%3A%2F%2Fexample.com%2Fcode.jpg&rurl=https%3A%2F%2Fgithub.com%2Ftestdev">
+                GitHub Dev Test
+            </a>
+        </body></html>
+        """
+        mock_get.return_value = mock_resp
+
+        provider = DirectYandexProvider()
+        res = provider.search(dummy_img)
+
+        assert res.provider == "Direct Yandex Images (Free)"
+        assert len(res.candidates) == 2
+        assert res.candidates[0].image_url == "https://example.com/profile.jpg"
+        assert "linkedin.com" in res.candidates[0].source_url
+        assert res.candidates[1].image_url == "https://example.com/code.jpg"
+        assert "github.com" in res.candidates[1].source_url
+
+
+class TestHeadlessLensProvider:
+    @patch.object(DirectYandexProvider, "search")
+    def test_headless_lens_fallback_on_captcha(self, mock_yandex_search, tmp_path):
+        from app.search import HeadlessLensProvider
+
+        dummy_img = tmp_path / "test.jpg"
+        dummy_img.write_text("fake")
+
+        mock_yandex_search.return_value = SearchResult(
+            candidates=[Candidate("https://example.com/y1.jpg", "https://x.com/user", "User on X", "x.com")],
+            provider="Direct Yandex Images (Free)",
+            searched_at="2026-09-04T00:00:00Z"
+        )
+
+        provider = HeadlessLensProvider(headless=True, fallback_on_captcha=True)
+        # When browser execution triggers captcha or fallback, it delegates to yandex
+        with patch("playwright.sync_api.sync_playwright") as mock_pw:
+            # Simulate browser error or block
+            mock_pw.side_effect = Exception("reCAPTCHA encountered")
+            res = provider.search(dummy_img)
+
+        assert len(res.candidates) == 1
+        assert "Direct Yandex Fallback" in res.provider
+        assert res.candidates[0].image_url == "https://example.com/y1.jpg"
+
+
+class TestFreeModeProviders:
+    def test_linkedin_allow_free_initialization(self):
+        from app.search import LinkedInPostProvider
+        prov = LinkedInPostProvider(api_key=None, allow_free=True)
+        assert prov._allow_free is True
+
+    def test_instagram_allow_free_initialization(self):
+        from app.search import InstagramProfileProvider
+        prov = InstagramProfileProvider(api_key=None, allow_free=True)
+        assert prov._allow_free is True
+
+    def test_free_multi_engine_fallback(self, tmp_path):
+        from app.search import FreeMultiEngineSearchProvider, HeadlessLensProvider, DirectYandexProvider
+        dummy_img = tmp_path / "test.jpg"
+        dummy_img.write_text("fake")
+
+        prov = FreeMultiEngineSearchProvider()
+        with patch.object(HeadlessLensProvider, "search") as mock_lens, \
+             patch.object(DirectYandexProvider, "search") as mock_yandex:
+            mock_lens.return_value = SearchResult(candidates=[], provider="Headless Google Lens", searched_at="2026-09-04T00:00:00Z")
+            mock_yandex.return_value = SearchResult(
+                candidates=[Candidate("https://example.com/y2.jpg", "https://yandex.com", "Title", "yandex.com")],
+                provider="Direct Yandex Images (Free)",
+                searched_at="2026-09-04T00:00:00Z"
+            )
+            res = prov.search(dummy_img)
+
+        assert len(res.candidates) == 1
+        assert res.candidates[0].image_url == "https://example.com/y2.jpg"
 
 
 

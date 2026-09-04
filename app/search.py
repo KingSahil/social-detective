@@ -1,10 +1,13 @@
 """
-Search provider abstraction + SerpAPI Google Lens implementation.
+Search provider abstraction + Headless Google Lens + Free Reverse Search implementations.
 
 Provides:
-    SearchProvider   — abstract base
-    SerpAPIProvider  — genuine reverse-image search via Google Lens
-    MockProvider     — for unit tests ONLY
+    SearchProvider                 — abstract base
+    HeadlessLensProvider           — self-contained headless Google Lens search (with automatic fallback)
+    DirectYandexProvider           — direct free reverse image search via Yandex Images
+    FreeMultiEngineSearchProvider  — orchestrates Headless Lens + Direct Yandex + DDGS OSINT
+    SerpAPIProvider                — legacy reverse-image search via SerpAPI
+    MockProvider                   — for unit tests ONLY
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from typing import Optional
 from urllib.parse import urlparse, urljoin
 from contextlib import contextmanager
 import threading
+import time
 
 import numpy as np
 import requests
@@ -256,6 +260,367 @@ class SerpAPIProvider(SearchProvider):
             searched_at=timestamp,
             raw_response=raw,
         )
+
+
+# ---------------------------------------------------------------------------
+# Direct Yandex Reverse Search Provider (100% Free - No SerpAPI required)
+# ---------------------------------------------------------------------------
+
+class DirectYandexProvider(SearchProvider):
+    """
+    Direct, free reverse image search via Yandex Images without SerpAPI.
+    Uploads local image to a temporary direct host (freeimage.host) to obtain
+    a public image URL, then queries Yandex's reverse search directly and extracts
+    candidate faces across indexed web appearances and social platforms.
+    """
+    PROVIDER_NAME = "Direct Yandex Images (Free)"
+
+    def __init__(self, timeout: float = 25.0):
+        self._timeout = timeout
+
+    def _upload_to_public_url(self, image_path: Path) -> str:
+        """Uploads local image to a temporary direct host (Catbox with freeimage.host fallback)."""
+        # 1. Try Catbox first (fast, reliable direct links, no API key required)
+        try:
+            with open(str(image_path), "rb") as f:
+                cat_resp = requests.post(
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload"},
+                    files={"fileToUpload": ("image.jpg", f, "image/jpeg")},
+                    timeout=self._timeout,
+                )
+            if cat_resp.status_code == 200 and cat_resp.text.strip().startswith("http"):
+                return cat_resp.text.strip()
+        except Exception:
+            pass
+
+        # 2. Fallback to freeimage.host
+        import base64
+        import tempfile
+        from PIL import Image
+
+        temp_jpeg = None
+        try:
+            with Image.open(str(image_path)) as im:
+                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                temp_jpeg = tmp.name
+                tmp.close()
+                im.convert("RGB").save(temp_jpeg, "JPEG", quality=92)
+                with open(temp_jpeg, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+        finally:
+            if temp_jpeg and Path(temp_jpeg).exists():
+                try:
+                    Path(temp_jpeg).unlink()
+                except OSError:
+                    pass
+
+        resp = requests.post(
+            "https://freeimage.host/api/1/upload",
+            data={
+                "key": "6d207e02198a847aa98d0a2a901485a5",
+                "action": "upload",
+                "source": b64,
+                "format": "json",
+            },
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        url = resp.json().get("image", {}).get("url")
+        if not url:
+            raise RuntimeError(f"FreeImage upload failed: {resp.text}")
+        return url
+
+    def search(self, image_path: str | Path) -> SearchResult:
+        image_path = Path(image_path).resolve()
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            public_url = self._upload_to_public_url(image_path)
+        except Exception as e:
+            return SearchResult(
+                candidates=[],
+                provider=self.PROVIDER_NAME,
+                searched_at=timestamp,
+                raw_response={"error": f"Image host upload failed: {e}"},
+            )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        yandex_url = f"https://yandex.com/images/search?rpt=imageview&url={public_url}"
+
+        candidates: list[Candidate] = []
+        raw_info: dict = {"public_url": public_url, "yandex_url": yandex_url}
+        try:
+            resp = requests.get(yandex_url, headers=headers, timeout=self._timeout)
+            if resp.status_code == 200 and resp.text:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                seen_img: set[str] = set()
+                from urllib.parse import unquote, urlparse
+
+                # 1. Parse similar images and site matches with img_url parameter
+                for a in soup.find_all("a"):
+                    href = a.get("href", "")
+                    if "img_url=" in href:
+                        m_img = re.search(r"img_url=([^&]+)", href)
+                        if m_img:
+                            img_u = unquote(m_img.group(1))
+                            if not img_u or img_u in seen_img or not img_u.startswith("http"):
+                                continue
+                            seen_img.add(img_u)
+
+                            m_rurl = re.search(r"rurl=([^&]+)", href)
+                            source_u = unquote(m_rurl.group(1)) if m_rurl else href
+                            if not source_u.startswith("http"):
+                                source_u = urljoin("https://yandex.com", source_u)
+
+                            title = a.get_text().strip()
+                            domain = urlparse(source_u).netloc or urlparse(img_u).netloc
+                            candidates.append(Candidate(
+                                image_url=img_u,
+                                source_url=source_u,
+                                title=title,
+                                domain=domain,
+                            ))
+
+                # 2. Parse direct site links in "Sites with information about the image"
+                for region in soup.find_all(["div", "section"]):
+                    heading = region.find(["h2", "h3"])
+                    if heading and "site" in heading.get_text().lower():
+                        for a in region.find_all("a"):
+                            href = a.get("href", "")
+                            if href.startswith("http") and "yandex" not in href:
+                                title = a.get_text().strip()
+                                domain = urlparse(href).netloc
+                                img_el = a.find("img")
+                                img_src = img_el.get("src") if img_el else ""
+                                if img_src and img_src.startswith("http") and img_src not in seen_img:
+                                    seen_img.add(img_src)
+                                    candidates.append(Candidate(
+                                        image_url=img_src,
+                                        source_url=href,
+                                        title=title,
+                                        domain=domain,
+                                    ))
+        except Exception as e:
+            raw_info["error"] = str(e)
+
+        filtered = filter_and_prioritize_candidates(candidates)
+        raw_info["count"] = len(filtered)
+
+        return SearchResult(
+            candidates=filtered,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response=raw_info,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Headless Google Lens Provider (Self-hosted automated visual discovery)
+# ---------------------------------------------------------------------------
+
+class HeadlessLensProvider(SearchProvider):
+    """
+    Self-contained headless Google Lens reverse visual search engine.
+    Uploads local image directly to Google Lens v3 upload endpoint to bypass in-page
+    bot verification, then orchestrates offscreen Chrome via Playwright to extract
+    visual matches with zero CAPTCHA friction.
+    Automatically delegates to DirectYandexProvider if Google Lens fails.
+    """
+    PROVIDER_NAME = "Headless Google Lens"
+
+    def __init__(
+        self,
+        headless: bool = True,
+        timeout: float = 25.0,
+        user_data_dir: str | Path | None = None,
+        fallback_on_captcha: bool = True,
+    ):
+        self.headless = headless
+        self.timeout = timeout
+        if user_data_dir is None:
+            import tempfile
+            self.user_data_dir = Path(tempfile.gettempdir()) / "social_detective_lens_profile"
+        else:
+            self.user_data_dir = Path(user_data_dir).resolve()
+        self.fallback_on_captcha = fallback_on_captcha
+
+    def search(self, image_path: str | Path) -> SearchResult:
+        image_path = Path(image_path).resolve()
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        candidates: list[Candidate] = []
+        raw_info: dict = {"image": str(image_path)}
+
+        # 1. Upload directly to Google Lens v3 upload endpoint to get search Location URL
+        # This completely bypasses Google's in-page bot detection and captcha triggers!
+        location = None
+        session = requests.Session()
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            with open(image_path, "rb") as f:
+                files = {"encoded_image": ("image.jpg", f, "image/jpeg")}
+                resp = session.post(
+                    "https://lens.google.com/v3/upload",
+                    files=files,
+                    headers=headers,
+                    allow_redirects=False,
+                    timeout=self.timeout,
+                )
+            location = resp.headers.get("Location")
+        except Exception as e:
+            raw_info["upload_error"] = str(e)
+
+        # 2. Render search results page via offscreen Chrome
+        html = ""
+        if location:
+            try:
+                from playwright.sync_api import sync_playwright
+                self.user_data_dir.mkdir(parents=True, exist_ok=True)
+
+                args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-infobars",
+                ]
+                if self.headless:
+                    # Offscreen coordinates ensure the window is invisible while running
+                    # in full headful mode, avoiding Google's headless bot detection
+                    args.extend(["--window-position=-2400,-2400", "--window-size=1920,1080"])
+
+                with sync_playwright() as p:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=str(self.user_data_dir),
+                        channel="chrome",
+                        headless=False if self.headless else False,
+                        ignore_default_args=["--enable-automation"],
+                        args=args,
+                        viewport={"width": 1920, "height": 1080},
+                    )
+                    page = context.pages[0] if context.pages else context.new_page()
+
+                    cookies_to_add = []
+                    for c in session.cookies:
+                        cookies_to_add.append({
+                            "name": c.name,
+                            "value": c.value,
+                            "domain": c.domain,
+                            "path": c.path,
+                        })
+                    if cookies_to_add:
+                        context.add_cookies(cookies_to_add)
+
+                    page.goto(location, wait_until="networkidle", timeout=int(self.timeout * 1000))
+                    time.sleep(2)
+                    page.evaluate("window.scrollTo(0, 1500)")
+                    time.sleep(1)
+
+                    html = page.content()
+                    raw_info["final_url"] = page.url
+                    context.close()
+
+                # 3. Parse Google Lens Visual Matches from embedded JSON
+                def clean_str(s: str) -> str:
+                    s = s.replace(r"\u003d", "=").replace(r"\u0026", "&").replace(r"\/", "/")
+                    s = s.replace(r"\u003c", "<").replace(r"\u003e", ">")
+                    return s
+
+                pattern = re.compile(
+                    r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*null,\s*\d+,\s*\{[^}]*"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"',
+                    re.DOTALL
+                )
+
+                seen: set[str] = set()
+                from urllib.parse import urlparse
+                for m in pattern.finditer(html):
+                    orig_img = clean_str(m.group(1))
+                    source_url = clean_str(m.group(4))
+                    title = clean_str(m.group(5))
+                    domain = urlparse(source_url).netloc
+                    if source_url not in seen:
+                        seen.add(source_url)
+                        candidates.append(Candidate(
+                            image_url=orig_img,
+                            source_url=source_url,
+                            title=title,
+                            domain=domain,
+                        ))
+
+            except Exception as e:
+                raw_info["browser_error"] = str(e)
+
+        # 4. Fallback to DirectYandexProvider if Google Lens returned no candidates
+        if not candidates and self.fallback_on_captcha:
+            print("        [i] Seamlessly activating Direct Free Visual Search fallback...")
+            yandex = DirectYandexProvider(timeout=self.timeout)
+            y_res = yandex.search(image_path)
+            if y_res.candidates:
+                return SearchResult(
+                    candidates=y_res.candidates,
+                    provider=f"{self.PROVIDER_NAME} (with Direct Yandex Fallback)",
+                    searched_at=timestamp,
+                    raw_response={"lens": raw_info, "yandex": y_res.raw_response},
+                )
+
+        filtered = filter_and_prioritize_candidates(candidates)
+        raw_info["candidate_count"] = len(filtered)
+        return SearchResult(
+            candidates=filtered,
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response=raw_info,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Free Multi-Engine Visual Search Provider
+# ---------------------------------------------------------------------------
+
+class FreeMultiEngineSearchProvider(SearchProvider):
+    """
+    Combined visual reverse search provider:
+    Orchestrates Headless Google Lens with Direct Yandex Visual Search
+    and DuckDuckGo social OSINT correlation without requiring any paid API keys.
+    """
+    PROVIDER_NAME = "Free Multi-Engine Visual Search"
+
+    def __init__(self, headless: bool = True, timeout: float = 25.0):
+        self.lens = HeadlessLensProvider(headless=headless, timeout=timeout, fallback_on_captcha=True)
+        self.yandex = DirectYandexProvider(timeout=timeout)
+
+    def search(self, image_path: str | Path) -> SearchResult:
+        res = self.lens.search(image_path)
+        if len(res.candidates) < 5:
+            try:
+                y_res = self.yandex.search(image_path)
+                existing_urls = {c.image_url for c in res.candidates}
+                for c in y_res.candidates:
+                    if c.image_url not in existing_urls:
+                        res.candidates.append(c)
+                        existing_urls.add(c.image_url)
+            except Exception:
+                pass
+        res.candidates = filter_and_prioritize_candidates(res.candidates)
+        return res
 
 
 # ---------------------------------------------------------------------------
@@ -852,11 +1217,12 @@ class LinkedInPostProvider(SearchProvider):
 
     PROVIDER_NAME = "LinkedIn Post Discovery"
 
-    def __init__(self, api_key: str | None = None, timeout: float = 6.0):
+    def __init__(self, api_key: str | None = None, timeout: float = 6.0, allow_free: bool = False):
         self._api_key = api_key
         self._timeout = timeout
+        self._allow_free = allow_free
 
-        if not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key:
+        if not self._allow_free and (not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key):
             raise RuntimeError(
                 "SERPAPI_KEY is not set or contains a placeholder. "
                 "Set a valid SERPAPI_KEY in your .env file."
@@ -867,12 +1233,18 @@ class LinkedInPostProvider(SearchProvider):
         if not names:
             return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
 
-        try:
-            import serpapi as serpapi_mod
-        except ImportError:
-            raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+        client = None
+        if self._api_key and not self._api_key.startswith("your_"):
+            try:
+                import serpapi as serpapi_mod
+                client = serpapi_mod.Client(api_key=self._api_key)
+            except ImportError:
+                if not self._allow_free:
+                    raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+                client = None
+        elif not self._allow_free:
+            raise RuntimeError("SERPAPI_KEY is not set or contains a placeholder.")
 
-        client = serpapi_mod.Client(api_key=self._api_key)
         discovered_urls: set[str] = set()
 
         # Build search queries combining associate names and event contexts
@@ -892,19 +1264,29 @@ class LinkedInPostProvider(SearchProvider):
 
         def _run_query(q: str) -> list[str]:
             urls = []
-            try:
-                res = client.search({"engine": "duckduckgo", "q": q})
-                items = res.get("organic_results", [])
-                if not items:
-                    res = client.search({"engine": "google", "q": q})
+            if client is not None:
+                try:
+                    res = client.search({"engine": "duckduckgo", "q": q})
                     items = res.get("organic_results", [])
-                for it in items:
-                    link = it.get("link", "")
-                    if "linkedin.com/posts/" in link:
-                        clean_url = link.split("?")[0].rstrip("/")
-                        urls.append(clean_url)
-            except Exception:
-                pass
+                    if not items:
+                        res = client.search({"engine": "google", "q": q})
+                        items = res.get("organic_results", [])
+                    for it in items:
+                        link = it.get("link", "")
+                        if "linkedin.com/posts/" in link:
+                            clean_url = link.split("?")[0].rstrip("/")
+                            urls.append(clean_url)
+                except Exception:
+                    pass
+            if not urls:
+                try:
+                    for it in _safe_ddgs_text(q, max_results=15):
+                        href = it.get("href", "")
+                        if "linkedin.com/posts/" in href:
+                            clean_url = href.split("?")[0].rstrip("/")
+                            urls.append(clean_url)
+                except Exception:
+                    pass
             return urls
 
         with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
@@ -1019,12 +1401,14 @@ class InstagramProfileProvider(SearchProvider):
         handle: str | None = None,
         api_key: str | None = None,
         timeout: float = 6.0,
+        allow_free: bool = False,
     ):
         self.handle = handle.lstrip("@").strip() if handle else None
         self._api_key = api_key
         self._timeout = timeout
+        self._allow_free = allow_free
 
-        if not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key:
+        if not self._allow_free and (not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key):
             raise RuntimeError(
                 "SERPAPI_KEY is not set or contains a placeholder. "
                 "Set a valid SERPAPI_KEY in your .env file."
@@ -1044,12 +1428,18 @@ class InstagramProfileProvider(SearchProvider):
         if not handles:
             return SearchResult(candidates=[], provider=self.PROVIDER_NAME, searched_at=timestamp)
 
-        try:
-            import serpapi as serpapi_mod
-        except ImportError:
-            raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+        client = None
+        if self._api_key and not self._api_key.startswith("your_"):
+            try:
+                import serpapi as serpapi_mod
+                client = serpapi_mod.Client(api_key=self._api_key)
+            except ImportError:
+                if not self._allow_free:
+                    raise RuntimeError("serpapi package not installed. Run: pip install serpapi")
+                client = None
+        elif not self._allow_free:
+            raise RuntimeError("SERPAPI_KEY is not set or contains a placeholder.")
 
-        client = serpapi_mod.Client(api_key=self._api_key)
         clean_handles = [h.lstrip("@").strip() for h in handles if h and h.strip()]
         # Prioritize personal handles over generic terms
         clean_handles = [h for h in clean_handles if h.lower() not in {"popular", "instagram", "posts", "post"}]
@@ -1102,43 +1492,44 @@ class InstagramProfileProvider(SearchProvider):
             res_codes = set()
             res_tags = set()
             # 1. Try SerpAPI if available and not exhausted
-            try:
-                for engine in ["duckduckgo", "google"]:
-                    for attempt in range(2):
-                        try:
-                            res = client.search({"engine": engine, "q": q})
-                            for item in res.get("organic_results", []):
-                                link = item.get("link", "")
-                                title = item.get("title", "")
-                                snippet = item.get("snippet", "")
-                                disp_link = item.get("displayed_link", "")
+            if client is not None:
+                try:
+                    for engine in ["duckduckgo", "google"]:
+                        for attempt in range(2):
+                            try:
+                                res = client.search({"engine": engine, "q": q})
+                                for item in res.get("organic_results", []):
+                                    link = item.get("link", "")
+                                    title = item.get("title", "")
+                                    snippet = item.get("snippet", "")
+                                    disp_link = item.get("displayed_link", "")
 
-                                sc = _extract_sc_from_url(link)
-                                if not sc:
-                                    sc_text = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", f"{disp_link} {title} {snippet}")
-                                    if sc_text:
-                                        sc = sc_text.group(1)
-                                if sc:
-                                    res_codes.add(sc)
+                                    sc = _extract_sc_from_url(link)
+                                    if not sc:
+                                        sc_text = re.search(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)", f"{disp_link} {title} {snippet}")
+                                        if sc_text:
+                                            sc = sc_text.group(1)
+                                    if sc:
+                                        res_codes.add(sc)
 
-                                tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {snippet}")
-                                for m_t in re.findall(r"([A-Za-z0-9_.]{3,30})\s+on Instagram", f"{title} {snippet}", re.IGNORECASE):
-                                    tags.append(m_t)
-                                for t in tags:
-                                    t_clean = t.lower()
-                                    if t_clean not in [h.lower() for h in clean_handles] and t_clean not in {"instagram", "p", "reel", "reels"}:
-                                        res_tags.add(t)
-                            if res_codes:
+                                    tags = re.findall(r"@([A-Za-z0-9_.]{3,30})", f"{title} {snippet}")
+                                    for m_t in re.findall(r"([A-Za-z0-9_.]{3,30})\s+on Instagram", f"{title} {snippet}", re.IGNORECASE):
+                                        tags.append(m_t)
+                                    for t in tags:
+                                        t_clean = t.lower()
+                                        if t_clean not in [h.lower() for h in clean_handles] and t_clean not in {"instagram", "p", "reel", "reels"}:
+                                            res_tags.add(t)
+                                if res_codes:
+                                    break
+                            except Exception as e:
+                                if "429" in str(e):
+                                    time.sleep(1.0 * (attempt + 1))
+                                    continue
                                 break
-                        except Exception as e:
-                            if "429" in str(e):
-                                time.sleep(1.0 * (attempt + 1))
-                                continue
+                        if res_codes:
                             break
-                    if res_codes:
-                        break
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
             # 2. Free DDGS fallback if no codes yet or SerpAPI is out of quota
             if not res_codes:

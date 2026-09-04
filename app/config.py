@@ -32,6 +32,8 @@ INPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Search provider
 # ---------------------------------------------------------------------------
 SERPAPI_KEY: str = os.getenv("SERPAPI_KEY", "")
+LENS_HEADLESS: bool = os.getenv("LENS_HEADLESS", "true").lower() not in ("false", "0", "no")
+LENS_TIMEOUT: float = float(os.getenv("LENS_TIMEOUT", "25.0"))
 
 # ---------------------------------------------------------------------------
 # Blockchain
@@ -62,9 +64,18 @@ def require_env(name: str, value: str) -> str:
     return value
 
 
-def require_search_config() -> str:
-    """Validate search-provider configuration."""
-    return require_env("SERPAPI_KEY", SERPAPI_KEY)
+def require_search_config(optional: bool = True) -> str:
+    """
+    Validate search-provider configuration.
+    If optional=True, returns empty string when SERPAPI_KEY is not configured,
+    allowing self-contained free headless search to run.
+    """
+    placeholders = ("your_", "YOUR_", "_here")
+    if not SERPAPI_KEY or any(p in SERPAPI_KEY for p in placeholders):
+        if optional:
+            return ""
+        return require_env("SERPAPI_KEY", SERPAPI_KEY)
+    return SERPAPI_KEY
 
 
 def require_blockchain_config() -> tuple[str, str, str]:

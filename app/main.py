@@ -28,6 +28,11 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import logging
+logging.raiseExceptions = False
+for _log_name in ["primp", "h2", "ddgs", "duckduckgo_search", "urllib3", "asyncio"]:
+    logging.getLogger(_log_name).setLevel(logging.CRITICAL)
+
 try:
     from colorama import init as colorama_init, Fore, Style
     colorama_init()
@@ -88,6 +93,7 @@ def run_pipeline(
     target: str | None = None,
     engine: str = "all",
     handle: str | None = None,
+    lens_visible: bool = False,
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -198,8 +204,8 @@ def run_pipeline(
 
         def _search_instagram() -> list[Candidate]:
             try:
-                api_key = require_search_config()
-                ig = InstagramProfileProvider(api_key=api_key)
+                api_key = require_search_config(optional=True)
+                ig = InstagramProfileProvider(api_key=api_key, allow_free=True)
                 res = ig.search_handles([clean_handle])
                 return res.candidates if res else []
             except Exception:
@@ -247,8 +253,11 @@ def run_pipeline(
     else:
         _step(2, total_steps, "WEB SEARCH")
 
-        from app.config import require_search_config
+        from app.config import require_search_config, LENS_HEADLESS
         from app.search import (
+            HeadlessLensProvider,
+            DirectYandexProvider,
+            FreeMultiEngineSearchProvider,
             SerpAPIProvider,
             YandexProvider,
             TwitterProfileProvider,
@@ -261,11 +270,31 @@ def run_pipeline(
         import tempfile
         import cv2
 
-        api_key = require_search_config()
-        if engine == "yandex":
-            search_provider = YandexProvider(api_key=api_key)
-        else:
+        api_key = require_search_config(optional=True)
+        headless = (not lens_visible) and LENS_HEADLESS
+
+        # Primary Search Provider configuration
+        # SerpAPI is primary when an API key is configured or explicitly requested
+        search_provider = None
+        if engine == "serpapi":
+            if not api_key:
+                _fatal("SERPAPI_KEY is not configured but required for --engine serpapi.")
             search_provider = SerpAPIProvider(api_key=api_key)
+        elif engine == "yandex":
+            if api_key:
+                search_provider = YandexProvider(api_key=api_key)
+            else:
+                search_provider = DirectYandexProvider()
+        elif engine == "lens":
+            if api_key:
+                search_provider = SerpAPIProvider(api_key=api_key)
+            else:
+                search_provider = HeadlessLensProvider(headless=headless, fallback_on_captcha=True)
+        else:  # "all" - default: SerpAPI Google Lens primary, free multi-engine fallback
+            if api_key:
+                search_provider = SerpAPIProvider(api_key=api_key)
+            else:
+                search_provider = FreeMultiEngineSearchProvider(headless=headless)
 
         _info(f"Provider: {search_provider.PROVIDER_NAME}")
         _info("Searching...")
@@ -276,13 +305,31 @@ def run_pipeline(
             _ok("Search completed")
             _ok(f"{candidate_count} candidates discovered across the web")
         except Exception as e:
-            _info(f"Visual reverse search engine notice: {e}")
-            search_result = SearchResult(
-                candidates=[],
-                provider=search_provider.PROVIDER_NAME,
-                searched_at=datetime.now(timezone.utc).isoformat(),
-            )
-            candidate_count = 0
+            _info(f"Primary search engine notice: {e}")
+            # Automatic fallback to Headless Lens / Direct Yandex
+            if isinstance(search_provider, (SerpAPIProvider, YandexProvider)):
+                _info("SerpAPI quota exhausted or unavailable. Activating free visual search fallback...")
+                try:
+                    fallback_provider = FreeMultiEngineSearchProvider(headless=headless)
+                    _info(f"Fallback Provider: {fallback_provider.PROVIDER_NAME}")
+                    search_result = fallback_provider.search(str(image_path_obj))
+                    candidate_count = len(search_result.candidates)
+                    _ok(f"{candidate_count} candidates discovered via free visual search fallback")
+                except Exception as fb_err:
+                    _info(f"Fallback visual search notice: {fb_err}")
+                    search_result = SearchResult(
+                        candidates=[],
+                        provider=search_provider.PROVIDER_NAME,
+                        searched_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    candidate_count = 0
+            else:
+                search_result = SearchResult(
+                    candidates=[],
+                    provider=search_provider.PROVIDER_NAME,
+                    searched_at=datetime.now(timezone.utc).isoformat(),
+                )
+                candidate_count = 0
 
         # Automated Cross-Platform Social Pivoting (OSINT Discovery)
         _info("Scanning cross-platform social identity memory...")
@@ -303,7 +350,7 @@ def run_pipeline(
 
             def _fetch_ig():
                 try:
-                    ig_prov = InstagramProfileProvider(api_key=api_key)
+                    ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
                     from app.search import extract_associate_network_leads
                     _, contexts = extract_associate_network_leads()
                     return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
@@ -407,25 +454,37 @@ def run_pipeline(
 
     # If still no matches above threshold and engine allows, try Yandex fallback
     if not matches and not target and not handle and engine in ("all", "yandex"):
-        _info("No candidates above threshold with Google Lens.")
+        _info("No candidates above threshold with primary visual search.")
         _info("Searching Yandex Images (deep social/facial reverse search)...")
         print()
-        from app.search import YandexProvider
-        try:
-            from app.config import require_search_config
-            api_key = require_search_config()
-            yandex_provider = YandexProvider(api_key=api_key)
-            yandex_res = yandex_provider.search(str(image_path_obj))
-            if yandex_res.candidates:
-                _ok(f"{len(yandex_res.candidates)} candidates discovered from Yandex Images")
-                _info("Analyzing Yandex candidate similarity...")
-                print()
-                y_matches = matcher.match_and_rank(query_embedding, yandex_res.candidates)
-                if y_matches:
-                    all_matches = y_matches
-                    matches = [m for m in all_matches if m.similarity >= threshold]
-        except Exception as e:
-            _info(f"Yandex search skipped: {e}")
+        from app.search import YandexProvider, DirectYandexProvider
+        yandex_res = None
+        if api_key:
+            try:
+                yandex_provider = YandexProvider(api_key=api_key)
+                yandex_res = yandex_provider.search(str(image_path_obj))
+            except Exception as ye:
+                _info(f"SerpAPI Yandex notice ({ye}); delegating to Direct Yandex fallback...")
+                try:
+                    yandex_provider = DirectYandexProvider()
+                    yandex_res = yandex_provider.search(str(image_path_obj))
+                except Exception as dye:
+                    _info(f"Direct Yandex search notice: {dye}")
+        else:
+            try:
+                yandex_provider = DirectYandexProvider()
+                yandex_res = yandex_provider.search(str(image_path_obj))
+            except Exception as dye:
+                _info(f"Direct Yandex search notice: {dye}")
+
+        if yandex_res and yandex_res.candidates:
+            _ok(f"{len(yandex_res.candidates)} candidates discovered from Yandex Images")
+            _info("Analyzing Yandex candidate similarity...")
+            print()
+            y_matches = matcher.match_and_rank(query_embedding, yandex_res.candidates)
+            if y_matches:
+                all_matches = y_matches
+                matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If still no matches above threshold and not targeted, activate Associate Forensics Graph
     if not matches and not target and not handle:
@@ -440,10 +499,7 @@ def run_pipeline(
             if assoc_contexts:
                 _info(f"Context tags: {', '.join(assoc_contexts[:3])}")
             try:
-                if not api_key:
-                    from app.config import require_search_config
-                    api_key = require_search_config()
-                li_provider = LinkedInPostProvider(api_key=api_key)
+                li_provider = LinkedInPostProvider(api_key=api_key, allow_free=True)
                 li_res = li_provider.search_leads(names=assoc_names, contexts=assoc_contexts)
                 if li_res.candidates:
                     _ok(f"{len(li_res.candidates)} candidate post(s) discovered from LinkedIn associate sweep")
@@ -684,9 +740,15 @@ def main() -> None:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["all", "lens", "yandex"],
+        choices=["all", "lens", "yandex", "serpapi"],
         default="all",
-        help="Visual search engine: 'all' (multi-engine cascade), 'lens' (Google Lens), or 'yandex' (Yandex Images). Default: 'all'.",
+        help="Visual search engine: 'all' (primary SerpAPI with free fallback), 'lens' (Google Lens with fallback), 'yandex' (Yandex Images), or 'serpapi' (SerpAPI only). Default: 'all'.",
+    )
+    parser.add_argument(
+        "--lens-visible",
+        action="store_true",
+        default=False,
+        help="Launch Google Lens browser with visible window (useful for interactive anti-bot verification).",
     )
 
     # Verify subcommand
@@ -713,6 +775,7 @@ def main() -> None:
             target=args.target,
             engine=args.engine,
             handle=args.handle,
+            lens_visible=getattr(args, "lens_visible", False),
         )
 
     else:

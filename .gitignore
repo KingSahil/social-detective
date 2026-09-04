@@ -46,3 +46,10 @@ data/results/*.pkl
 
 # External / sub-repositories
 antigravity-skills/
+
+# Browser profiles and debug artifacts
+.chrome_*
+*.lens_profile
+data/.lens_profile/
+lens_*.html
+lens_*.png
