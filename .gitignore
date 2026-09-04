@@ -44,3 +44,5 @@ data/results/*.jpeg
 data/results/test_face_1_crop.jpg
 data/results/*.pkl
 
+# External / sub-repositories
+antigravity-skills/
