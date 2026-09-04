@@ -58,7 +58,7 @@ This repository delivers an end-to-end implementation for **HH Goa 2026 Shortlis
 |:---|:---|:---|
 | **Pipeline Shape** | `Face scan input ➔ Web/social media search ➔ Blockchain upload/verification` | Direct 7-phase CLI pipeline transforming raw image pixels to on-chain notarization and audit. |
 | **Face Identification** | Detect & encode a face from an input image using any recognition library | **InsightFace** with deep CNN (`buffalo_l` pack) extracting normalized **512-dimensional ArcFace embeddings**. |
-| **Social Media / Web Search** | Genuine search step across web/social media (not hardcoded/pre-picked) | Cascaded search: **SerpAPI Google Lens**, **Headless Stealth Lens**, **Direct Yandex Images**, **Instagram Reels & Carousels**, **X/Twitter**, and **LinkedIn Associate Networks**. |
+| **Social Media / Web Search** | Genuine search step across web/social media (not hardcoded/pre-picked) | Cascaded search: **SerpAPI Google Lens**, **Headless Stealth Google Lens (Zero-CAPTCHA v3/upload bypass)**, **Direct Yandex Images**, **Instagram Reels & Carousels**, **X/Twitter**, and **LinkedIn Associate Networks**. |
 | **Blockchain Verification** | Upload post / content hash to blockchain; demonstrate re-verification & tamper evidence | Smart contract **`ContentRegistry.sol` (Solidity 0.8.19)** deployed on **Ethereum Sepolia Testnet**. Includes bi-directional hash audit and tamper detection. |
 | **No Website Required** | Focus on the core pipeline rather than hosting a web app | Enterprise-grade, clean terminal CLI application (`facetrace`) with rich formatting, real-time feedback, and programmatic exit codes. |
 | **GitHub Repo & Documentation** | Full source code with README covering: What it does, How to run it, Which blockchain used, Known limitations | Fully documented repository with complete setup guides, contract references, architecture diagrams, and limitation disclosures. |
@@ -294,11 +294,18 @@ flowchart TD
 * Computes normalized 512-dimensional feature representations invariant to variable illumination, camera focal lengths, and pose angles up to $\pm 45^\circ$.
 * Incorporates automated face cropping with configurable safety margins (default 35%) for focused secondary search cascades.
 
-### 2. Multi-Engine Visual Reverse Search Cascade
-* **Primary**: Google Lens reverse image discovery via SerpAPI to capture mass indexed web appearances.
-* **Autonomous Fallback**: Headless stealth browser with Playwright to query Google Lens without third-party APIs.
-* **Secondary**: Portrait-cropped visual query targeting isolated facial structures.
-* **Tertiary**: Yandex Images facial biometric index for deep Russian/Eastern European and secondary social platform discovery.
+### 2. Multi-Engine Visual Reverse Search Cascade & Zero-CAPTCHA Architecture
+* **Primary**: Google Lens reverse image discovery via **SerpAPI** for fast, mass-indexed visual appearance discovery.
+* **Autonomous Zero-CAPTCHA Fallback (`HeadlessLensProvider`)**:
+  - *The Bot Challenge*: Traditional browser automation uploading images directly via `lens.google.com` triggers Google's Enterprise reCAPTCHA challenge grid ("Select all fire hydrants") and `sorry/index` bot screens.
+  - *The Breakthrough*: FaceTrace bypasses browser upload triggers by dispatching raw image multipart payloads directly to Google's backend visual upload endpoint (`https://lens.google.com/v3/upload`).
+  - *Offscreen Stealth Rendering*: Google validates the image and issues an HTTP 303 redirect with a session search URL (`https://www.google.com/search?vsrid=...`). Playwright Chromium then navigates offscreen (`--window-position=-2400,-2400`) in full rendering mode without headless automation signatures, triggering **zero CAPTCHAs** and rendering complete visual results.
+  - *Embedded Data Stream Extraction*: Directly extracts and parses high-resolution image candidates, target post URLs, and source titles from Google's embedded JSON script arrays.
+* **Tertiary Fallback (`DirectYandexProvider`)**:
+  - If Google Lens is unreachable or rate-limited, FaceTrace seamlessly pivots to direct Yandex visual search with facial crops for deep cross-index coverage.
+* **Resilient Cascade**:
+  - `SerpAPI Google Lens` $\rightarrow$ *(on quota 429 / failure)* $\rightarrow$ `Headless Google Lens` $\rightarrow$ `Direct Yandex Images` $\rightarrow$ `Social Pivot Sweeping`.
+  - Zero manual intervention required; the pipeline automatically degrades gracefully and logs transparent notices.
 
 ### 3. Cross-Platform Social Pivoting & Forensic Identity Memory
 * **Persistent Subject Memory**: Automatically scans previous case files in `data/results/` and matches query face vectors against historical targets to recall known social handles and creator usernames.
@@ -488,14 +495,70 @@ CONTRACT_ADDRESS=0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21
 ### 5. Running the Pipeline End-to-End
 
 #### Option A: Autonomous Reverse Visual Web Search (Default)
-Takes a face image, automatically cascades across visual search engines (Google Lens $\rightarrow$ Cropped Face $\rightarrow$ Yandex), matches candidate faces, downloads matching content, computes SHA-256, notarizes on Ethereum Sepolia, and verifies on-chain:
+Takes a face image, automatically queries Google Lens via SerpAPI, and if quota is exhausted (HTTP 429), automatically activates the **Zero-CAPTCHA Free Visual Search Fallback** (`HeadlessLensProvider` $\rightarrow$ `DirectYandexProvider`), matches candidate faces, computes SHA-256, notarizes on Ethereum Sepolia, and verifies on-chain:
 ```bash
-python -m app.main --image ./data/input/test_face_11.jpg
+python -m app.main --image ./data/input/test_face_10.jpg
+```
+
+**Real-World Terminal Output (SerpAPI Quota Exhausted $\rightarrow$ Zero-CAPTCHA Fallback Activated):**
+```text
+============================================================
+               FACETRACE                   
+      Face Search + Blockchain Verification                 
+============================================================
+
+  [1/7] FACE DETECTION
+        ✓ Face detected
+        ✓ Face embedding generated (512-d)
+
+  [2/7] WEB SEARCH
+        Provider: SerpAPI Google Lens
+        Searching...
+        Primary search engine notice: Image upload to SerpAPI failed: 429 Client Error: Too Many Requests for url: https://serpapi.com/image
+        SerpAPI quota exhausted or unavailable. Activating free visual search fallback...
+        Fallback Provider: Free Multi-Engine Visual Search
+        ✓ 41 candidates discovered via free visual search fallback
+        Scanning cross-platform social identity memory...
+        Social Pivot: Correlating across 1 handle(s): @images
+        Sources found: www.reddit.com, yandex.com
+
+  [3/7] FACE MATCHING
+        Analyzing candidate face similarity...
+
+        #1   Similarity: 98.9%  [www.reddit.com]
+        #2   Similarity: 97.0%  [www.reddit.com]
+        #3   Similarity: 27.9%  [yandex.com]
+
+        ✓ Strongest candidate selected: www.reddit.com (Similarity: 98.9%)
+
+  [4/7] CONTENT RETRIEVAL
+        ✓ Matching content retrieved
+        Source: https://www.reddit.com/r/GNDU/comments/1mheflh/how_was_your_first_day_freshers/
+        Title: Reddit
+        Platform: www.reddit.com
+        ✓ Image downloaded (388778 bytes)
+
+  [5/7] FINGERPRINT
+        Algorithm: SHA-256
+        573dd58edb6e68a52ff76336308dda0afa349cb75ddbcd21e5dbd48c7c4b90eb
+
+  [6/7] BLOCKCHAIN
+        Network: Ethereum Sepolia
+        Contract: 0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21
+        Submitting transaction...
+        ✓ Transaction confirmed
+        TX: 0xc852bc9468b589f5158d9637bec74e61d6ce1909c1ba7ef59dee30a1beeb1a23
+        Block: 11632528
+
+  [7/7] VERIFICATION
+        Local hash: 573dd58edb6e68a52ff76336308dda0afa349cb75ddbcd21e5dbd48c7c4b90eb
+        On-chain: ✓ Hash found
+        ✓ CONTENT VERIFIED
 ```
 
 With custom similarity threshold (default: `0.70`):
 ```bash
-python -m app.main --image ./data/input/test_face_11.jpg --threshold 0.80
+python -m app.main --image ./data/input/test_face_12.jpg --threshold 0.80
 ```
 
 #### Option B: Targeted Social Post & Reel Verification (`--target`)
