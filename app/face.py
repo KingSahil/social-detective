@@ -59,6 +59,29 @@ class FaceProcessor:
         # to CPU-only when onnxruntime-gpu is absent or the GPU is unusable.
         # FACE_DEVICE=cpu|auto (default auto) forces the CPU path.
         import os as _os
+        import sys as _sys
+
+        if _sys.platform == "win32":
+            # On Windows, pip-installed NVIDIA runtime wheels (cublas, cudnn, etc.)
+            # place DLLs inside site-packages/nvidia/<pkg>/bin. Inject them into PATH
+            # and os.add_dll_directory so ONNX Runtime's CUDA EP finds them cleanly.
+            import importlib.util as _util
+            for _pkg in ("nvidia.cu13", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_runtime", "nvidia.cu12"):
+                try:
+                    _spec = _util.find_spec(_pkg)
+                    if _spec and _spec.submodule_search_locations:
+                        for _loc in _spec.submodule_search_locations:
+                            for _root, _, _files in _os.walk(_loc):
+                                if any(_f.endswith(".dll") for _f in _files):
+                                    if _root not in _os.environ["PATH"]:
+                                        _os.environ["PATH"] = _root + _os.pathsep + _os.environ["PATH"]
+                                    try:
+                                        _os.add_dll_directory(_root)
+                                    except (AttributeError, OSError):
+                                        pass
+                except Exception:
+                    pass
+
         device_pref = _os.getenv("FACE_DEVICE", "auto").strip().lower()
         providers = None
         try:

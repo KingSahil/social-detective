@@ -464,19 +464,28 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-#### GPU acceleration (Linux + NVIDIA, optional but recommended)
+#### GPU acceleration (Linux & Windows + NVIDIA, optional but recommended)
 
 `insightface` pulls in CPU `onnxruntime` as a hard dependency, and the two builds **overwrite the same module**, so the GPU build must be swapped in as an explicit final step:
 
+**Linux:**
 ```bash
 pip uninstall -y onnxruntime onnxruntime-gpu
 pip install onnxruntime-gpu
 ```
 
+**Windows (NVIDIA GPU):**
+```powershell
+pip uninstall -y onnxruntime onnxruntime-gpu
+pip install onnxruntime-gpu nvidia-cublas nvidia-cudnn-cu13 nvidia-cuda-runtime
+```
+
 > [!IMPORTANT]
 > `onnxruntime` and `onnxruntime-gpu` must **never** be installed together: whichever resolves last silently clobbers the other, breaking imports or dropping CUDA support. Always uninstall both before installing one.
 
-Requirements for the CUDA execution provider: an NVIDIA driver with CUDA 12 runtime + cuDNN libraries visible to the loader. On Arch, `nvidia-utils` ships all of them. On other distros, install the vendor `cuda`/`cudnn` runtime packages (or the NVIDIA pip wheels `nvidia-cudnn-cu12` / `nvidia-cublas-cu12`) if the provider check below comes up empty.
+Requirements for the CUDA execution provider: an NVIDIA driver with CUDA 12/13 runtime + cuDNN libraries visible to the loader.
+- On Linux (Arch): `nvidia-utils` ships all of them. On Ubuntu/Debian/Fedora, install distro packages or the NVIDIA pip wheels.
+- On Windows: simply installing `nvidia-cublas nvidia-cudnn-cu13 nvidia-cuda-runtime` via pip provides all necessary runtime DLLs. `app/face.py` automatically discovers and mounts these DLL directories into the process PATH and DLL search order on Windows—no manual CUDA Toolkit or environment variable editing required.
 
 Verify:
 ```bash
@@ -489,13 +498,13 @@ The app prefers CUDA automatically and falls back to CPU if the GPU session can'
 ```bash
 FACE_DEVICE=cpu python -m app.main --image ./data/input/test_face_10.jpg
 ```
-Results are numerically equivalent either way (embedding cosine > 0.9999 vs CPU; detection identical). Windows users: keep plain `onnxruntime`, the app runs CPU-only there by default.
+Results are numerically equivalent either way (embedding cosine > 0.9999 vs CPU; detection identical).
 
 #### Platform notes (Windows)
 
 The pipeline runs on Windows as well (it was originally built there), and every cross-platform change in this repo is covered by the test suite. A few Windows specifics:
 
-- **onnxruntime build**: stay on plain `onnxruntime` (CPU), which is what `requirements.txt` installs. The GPU build exists for Windows too, but it needs the CUDA and cuDNN DLLs from the NVIDIA CUDA toolkit on your `PATH`, otherwise the CUDA provider will not appear. CPU mode works fine, the matching phase just takes a few seconds more.
+- **GPU acceleration**: Fully supported via `onnxruntime-gpu` and the NVIDIA pip runtime wheels (`nvidia-cublas`, `nvidia-cudnn-cu13`, `nvidia-cuda-runtime`). The pipeline automatically loads the required CUDA and cuDNN DLLs dynamically. If running purely CPU mode, plain `onnxruntime` works out of the box.
 - **Headless Google Lens browser**: Windows has no `chromium` binary on PATH, so the provider falls back to Playwright's `channel="chrome"` lookup, which finds an installed Google Chrome automatically. Either install Chrome, or point the `CHROMIUM_PATH` env var at `chrome.exe`. With no browser at all the pipeline still works through the Direct Yandex fallback, which needs no browser.
 - **Everything else is portable**: the SerpAPI image upload, candidate dedupe, keepalive session, GPU/CPU switching and the phase timing report behave identically. solc (via py-solc-x), web3, instaloader, ddgs and the utf-8 console output all handle Windows out of the box.
 
