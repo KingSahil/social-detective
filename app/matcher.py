@@ -162,7 +162,7 @@ class FaceMatcher:
                     "Chrome/124.0.0.0 Safari/537.36"
                 )
             }
-            resp = requests.get(url, timeout=min(8.0, self._timeout), headers=headers)
+            resp = requests.get(url, timeout=min(5.0, self._timeout), headers=headers)
             resp.raise_for_status()
             data = resp.content
             # Decode with OpenCV

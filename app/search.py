@@ -529,10 +529,13 @@ class HeadlessLensProvider(SearchProvider):
                     if cookies_to_add:
                         context.add_cookies(cookies_to_add)
 
-                    page.goto(location, wait_until="networkidle", timeout=int(self.timeout * 1000))
-                    time.sleep(2)
+                    page.goto(location, wait_until="load", timeout=int(self.timeout * 1000))
+                    try:
+                        page.wait_for_selector("div[data-item-id], [jsname], script", timeout=3000)
+                    except Exception:
+                        pass
                     page.evaluate("window.scrollTo(0, 1500)")
-                    time.sleep(1)
+                    time.sleep(0.5)
 
                     html = page.content()
                     raw_info["final_url"] = page.url
@@ -1634,8 +1637,10 @@ class InstagramProfileProvider(SearchProvider):
                     pass
             return items
 
-        with ThreadPoolExecutor(max_workers=min(len(discovered_shortcodes), 8) or 1) as pool:
-            for unpacked_list in pool.map(_unpack_shortcode, sorted(discovered_shortcodes)):
+        # Unpack top discovered shortcodes into Candidates (capped at 8 for performance)
+        target_shortcodes = sorted(discovered_shortcodes)[:8]
+        with ThreadPoolExecutor(max_workers=min(len(target_shortcodes), 6) or 1) as pool:
+            for unpacked_list in pool.map(_unpack_shortcode, target_shortcodes):
                 candidates.extend(unpacked_list)
 
         return SearchResult(
