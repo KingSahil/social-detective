@@ -54,3 +54,4 @@ data/.lens_profile/
 lens_*.html
 lens_*.png
 scratch/
+data/memory/ipfs_cache/

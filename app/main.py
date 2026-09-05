@@ -98,6 +98,7 @@ def run_pipeline(
     skip_blockchain: bool = False,
     no_memory: bool = False,
     context: str | None = None,
+    sync_web3: bool = False,
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -583,6 +584,18 @@ def run_pipeline(
     # If subject identity memory is active, check memory leads too
     if not no_memory:
         try:
+            from app.memory.graph import IdentityKnowledgeGraph
+            kg = IdentityKnowledgeGraph()
+            kg_person, kg_sim = kg.find_nearest_person(query_embedding, threshold=0.65)
+            if kg_person:
+                _ok(f"Correlated with Web3-verified subject: {kg_person.name} ({kg_sim*100:.1f}%)")
+                kg_cands = kg.get_appearance_candidates(kg_person)
+                if kg_cands:
+                    priority_candidates.extend(kg_cands)
+        except Exception:
+            pass
+
+        try:
             from app.search import find_subject_memory_leads
             recalled_handles_list, memory_candidates = find_subject_memory_leads(query_embedding, fp=fp)
             if memory_candidates:
@@ -948,7 +961,31 @@ def run_pipeline(
                 _info("Awaiting Sepolia block inclusion (~12s slot time)...")
 
         source_id = content.platform or ""
-        tx = bc.register_hash(content_hash, source_id, wait=not async_tx, on_sent=_on_tx_sent)
+        ipfs_cid = None
+        try:
+            from app.memory.ipfs import IPFSClient, VerifiedIdentityPayload
+            from app.memory.graph import IdentityKnowledgeGraph
+            from datetime import datetime, timezone
+            ipfs_cli = IPFSClient()
+            payload = VerifiedIdentityPayload(
+                content_hash=content_hash,
+                embedding=query_embedding.tolist() if hasattr(query_embedding, "tolist") else list(query_embedding),
+                name=getattr(content, "author", "") or record.get("match", {}).get("author", "") or "",
+                platform=content.platform or best.candidate.domain or "",
+                handle=record.get("search", {}).get("handle", ""),
+                source_url=best.candidate.source_url,
+                image_url=best.candidate.image_url,
+                events=[context] if context else [],
+                verified_at=datetime.now(timezone.utc).isoformat(),
+            )
+            ipfs_cid = ipfs_cli.publish_identity_record(payload)
+            _ok(f"Decentralized IPFS CID: {C_CYAN}ipfs://{ipfs_cid}{C_RESET}")
+            record["ipfs"] = {"cid": ipfs_cid, "uri": f"ipfs://{ipfs_cid}"}
+            IdentityKnowledgeGraph().add_verified_record(payload, ipfs_cid=ipfs_cid)
+        except Exception as e:
+            _info(f"IPFS pinning deferred: {e}")
+
+        tx = bc.register_hash(content_hash, source_id, wait=not async_tx, on_sent=_on_tx_sent, ipfs_cid=ipfs_cid)
         _mark("blockchain")
 
         tx_display = tx.tx_hash
@@ -1139,6 +1176,14 @@ def main() -> None:
         help="Event, organization, or campaign context keyword to guide dynamic OSINT search (e.g. 'HackHazards', 'Symbiosis').",
     )
 
+    parser.add_argument(
+        "--sync-web3",
+        dest="sync_web3",
+        action="store_true",
+        default=False,
+        help="Synchronize collective identity memory from Ethereum Sepolia smart contract and IPFS.",
+    )
+
     # Verify subcommand
     verify_parser = subparsers.add_parser("verify", help="Verify a saved record.")
     verify_parser.add_argument(
@@ -1155,7 +1200,27 @@ def main() -> None:
         _print_verification(result)
         sys.exit(0 if result.get("verified") else 1)
 
-    elif args.image:
+    if getattr(args, "sync_web3", False):
+        _banner()
+        print("  [WEB3 MEMORY SYNC] Connecting to Ethereum Sepolia...")
+        try:
+            from app.config import require_blockchain_config
+            from app.blockchain import BlockchainClient
+            from app.memory.web3_sync import Web3MemorySyncer
+            rpc, pk, ca = require_blockchain_config()
+            bc = BlockchainClient(rpc, pk, ca)
+            syncer = Web3MemorySyncer(bc)
+            stats = syncer.sync(lookback_blocks=25000)
+            _ok(f"Sepolia Events Scanned: {stats['events_scanned']}")
+            _ok(f"IPFS CIDs Discovered: {stats['cids_found']}")
+            _ok(f"Identities in Shared Knowledge Graph: {stats['identities_in_graph']}")
+        except Exception as e:
+            _fail(f"Web3 sync failed: {e}")
+        print()
+        if not args.image:
+            sys.exit(0)
+
+    if args.image:
         run_pipeline(
             args.image,
             threshold=args.threshold,
@@ -1168,6 +1233,7 @@ def main() -> None:
             skip_blockchain=getattr(args, "skip_blockchain", False),
             no_memory=getattr(args, "no_memory", False),
             context=getattr(args, "context", None),
+            sync_web3=getattr(args, "sync_web3", False),
         )
 
     else:

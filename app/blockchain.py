@@ -151,6 +151,7 @@ class BlockchainClient:
         wait: bool = True,
         priority_fee_gwei: float = 2.5,
         on_sent: Optional[Callable[[str], None]] = None,
+        ipfs_cid: Optional[str] = None,
     ) -> TxResult:
         """
         Call ``registerRecord(bytes32, string)`` on-chain using EIP-1559 Type-2 transactions.
@@ -168,8 +169,14 @@ class BlockchainClient:
             inclusion in the very next Ethereum Sepolia block slot (~12s).
         on_sent : Optional[Callable[[str], None]]
             Callback executed immediately after raw transaction broadcast.
+        ipfs_cid : Optional[str]
+            Decentralized IPFS Content Identifier for rich identity payload.
         """
         from app.hashing import hex_to_bytes32
+
+        if ipfs_cid:
+            clean_cid = ipfs_cid.removeprefix("ipfs://")
+            source_id = f"{source_id}|ipfs://{clean_cid}" if source_id else f"ipfs://{clean_cid}"
 
         hash_bytes = hex_to_bytes32(content_hash_hex)
 
@@ -275,3 +282,52 @@ class BlockchainClient:
             )
         except Exception as e:
             return VerifyResult(error=str(e))
+
+    def get_registered_events(
+        self,
+        from_block: int = 0,
+        to_block: str | int = "latest",
+        chunk_size: int = 9000,
+    ) -> list[dict]:
+        """
+        Query past RecordRegistered events from the smart contract in safe chunks.
+        Used for decentralized Web3 memory synchronization.
+        """
+        try:
+            if to_block == "latest":
+                end_block = self._w3.eth.block_number
+            else:
+                end_block = int(to_block)
+            start_block = max(0, int(from_block))
+
+            all_logs = []
+            cur = start_block
+            while cur <= end_block:
+                nxt = min(cur + chunk_size - 1, end_block)
+                try:
+                    logs = self._contract.events.RecordRegistered().get_logs(
+                        from_block=cur,
+                        to_block=nxt,
+                    )
+                    all_logs.extend(logs)
+                except Exception:
+                    pass
+                cur = nxt + 1
+
+            results = []
+            for log in all_logs:
+                args = log.get("args", {})
+                content_hash = args.get("contentHash")
+                hash_hex = content_hash.hex() if hasattr(content_hash, "hex") else str(content_hash)
+                tx_hash = log.get("transactionHash", b"")
+                tx_hex = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+                results.append({
+                    "block_number": log.get("blockNumber", 0),
+                    "transaction_hash": tx_hex,
+                    "content_hash": hash_hex,
+                    "timestamp": args.get("timestamp", 0),
+                    "source_id": args.get("sourceId", ""),
+                })
+            return results
+        except Exception:
+            return []
