@@ -36,6 +36,14 @@ LENS_HEADLESS: bool = os.getenv("LENS_HEADLESS", "true").lower() not in ("false"
 LENS_TIMEOUT: float = float(os.getenv("LENS_TIMEOUT", "25.0"))
 
 # ---------------------------------------------------------------------------
+# Tor / Anonymity
+# ---------------------------------------------------------------------------
+USE_TOR: bool = os.getenv("USE_TOR", "false").lower() not in ("false", "0", "no", "")
+TOR_PROXY_URL: str = os.getenv("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
+TOR_CONTROL_PORT: int = int(os.getenv("TOR_CONTROL_PORT", "9051"))
+TOR_PASSWORD: str = os.getenv("TOR_PASSWORD", "")
+
+# ---------------------------------------------------------------------------
 # Blockchain
 # ---------------------------------------------------------------------------
 RPC_URL: str = os.getenv("RPC_URL", "")
