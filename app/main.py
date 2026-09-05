@@ -94,6 +94,9 @@ def run_pipeline(
     engine: str = "all",
     handle: str | None = None,
     lens_visible: bool = False,
+    async_tx: bool = False,
+    skip_blockchain: bool = False,
+    no_memory: bool = False,
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -115,9 +118,13 @@ def run_pipeline(
 
     # Pre-launch web search and blockchain client concurrently with Face Detection
     from concurrent.futures import ThreadPoolExecutor
-    bg_executor = ThreadPoolExecutor(max_workers=2)
+    bg_executor = ThreadPoolExecutor(max_workers=8)
     search_future = None
     prelaunched_search_provider = None
+
+    # Pre-launch OCR extractor concurrently with Face Detection
+    from app.ocr import extract_scene_text_and_clues
+    ocr_future = bg_executor.submit(extract_scene_text_and_clues, str(image_path_obj))
 
     def _prewarm_blockchain():
         try:
@@ -128,7 +135,9 @@ def run_pipeline(
         except Exception:
             return None
 
-    blockchain_future = bg_executor.submit(_prewarm_blockchain)
+    blockchain_future = None
+    if not skip_blockchain:
+        blockchain_future = bg_executor.submit(_prewarm_blockchain)
 
     if not target and not handle:
         from app.config import require_search_config, LENS_HEADLESS
@@ -195,6 +204,54 @@ def run_pipeline(
         "face_detected": True,
         "embedding_dim": int(query_embedding.shape[0]),
     }
+
+    # Harvest scene, badge & credential clues via parallel RapidOCR
+    ocr_clues = {}
+    try:
+        if ocr_future:
+            ocr_clues = ocr_future.result(timeout=4.0)
+    except Exception:
+        pass
+
+    record["ocr"] = ocr_clues
+
+    has_ocr_credentials = bool(
+        ocr_clues.get("hashtags")
+        or ocr_clues.get("handles")
+        or ocr_clues.get("entities")
+        or (ocr_clues.get("keywords") and len(ocr_clues.get("raw_text", "")) > 15)
+    )
+
+    early_event_future = None
+    if has_ocr_credentials and not target and not handle:
+        clue_tokens = [f"#{h}" for h in ocr_clues.get("hashtags", [])] + [f"@{h}" for h in ocr_clues.get("handles", [])] + ocr_clues.get("entities", [])
+        if clue_tokens:
+            _ok(f"Extracted OCR credential clues: {', '.join(clue_tokens)}")
+
+        def _gather_early_event_candidates(img_path, clues_dict):
+            from app.search import discover_osint_event_leads, TwitterProfileProvider
+            ev_handles, ev_cands, _ = discover_osint_event_leads(img_path, cached_clues=clues_dict)
+            results = list(ev_cands)
+            extracted_by_handle = {}
+            if ev_handles:
+                from concurrent.futures import ThreadPoolExecutor
+                def _fetch(h):
+                    try:
+                        return h, TwitterProfileProvider(h).search()
+                    except Exception:
+                        return h, None
+                with ThreadPoolExecutor(max_workers=min(len(ev_handles), 8)) as p:
+                    for h, res in p.map(_fetch, ev_handles):
+                        if res and res.candidates:
+                            results.extend(res.candidates)
+                            extracted_by_handle[h] = len(res.candidates)
+            return ev_handles, results, extracted_by_handle
+
+        early_event_future = bg_executor.submit(
+            _gather_early_event_candidates,
+            str(image_path_obj),
+            ocr_clues
+        )
 
     # ==================================================================
     # [2/7] WEB SEARCH / TARGET MEDIA DISCOVERY
@@ -463,8 +520,6 @@ def run_pipeline(
     # [3/7] FACE MATCHING
     # ==================================================================
     _step(3, total_steps, "FACE MATCHING")
-    _info("Analyzing candidate face similarity...")
-    print()
 
     from app.matcher import FaceMatcher
 
@@ -483,8 +538,48 @@ def run_pipeline(
         _info(f"Filtering to platform '{platform}': {len(search_candidates)} candidates")
 
     matcher = FaceMatcher(fp)
-    all_matches = matcher.match_and_rank(query_embedding, search_candidates)
-    matches = [m for m in all_matches if m.similarity >= threshold]
+    all_matches = []
+    matches = []
+
+    # Priority Fast Path: Targeted Credential & Social Event Pivot Candidates
+    priority_candidates = []
+    if early_event_future:
+        try:
+            ev_handles, ev_cands, extracted_by_handle = early_event_future.result(timeout=25.0)
+            if ev_handles:
+                _info(f"Social Pivot: Correlating across {len(ev_handles)} handle(s): {', '.join(['@' + h for h in ev_handles[:6]])}" + (f" (+{len(ev_handles)-6} more)" if len(ev_handles) > 6 else ""))
+            for h, count in extracted_by_handle.items():
+                _ok(f"Extracted {count} media candidate(s) from @{h} on X/Twitter")
+            if ev_cands:
+                priority_candidates.extend(ev_cands)
+        except Exception:
+            pass
+
+    # If subject identity memory is active, check memory leads too
+    if not no_memory:
+        try:
+            from app.search import find_subject_memory_leads
+            recalled_handles_list, memory_candidates = find_subject_memory_leads(query_embedding, fp=fp)
+            if memory_candidates:
+                _ok(f"Correlating with {len(memory_candidates)} verified appearance candidate(s) from subject memory")
+                priority_candidates.extend(memory_candidates)
+        except Exception:
+            pass
+
+    if priority_candidates:
+        _info("Analyzing targeted credential & social pivot candidate similarity...")
+        print()
+        early_matches = matcher.match_and_rank(query_embedding, priority_candidates)
+        matches = [m for m in early_matches if m.similarity >= threshold]
+        if matches:
+            all_matches = early_matches
+
+    # If no priority matches above threshold, evaluate open visual search candidates
+    if not matches:
+        _info("Analyzing candidate face similarity...")
+        print()
+        all_matches = matcher.match_and_rank(query_embedding, search_candidates)
+        matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If no matches above threshold and we used open web search, try fallback to cropped face
     if not matches and not target and not handle:
@@ -558,10 +653,14 @@ def run_pipeline(
         _info("No candidates above threshold with visual search.")
         _info("Activating cross-platform OSINT social pivot & identity memory...")
         discovered_handles = set(extract_social_handles(search_result.candidates))
-        recalled_handles_list, memory_candidates = find_subject_memory_leads(query_embedding, fp=fp)
-        recalled_handles = set(recalled_handles_list)
 
-        # 1. Immediately evaluate known verified appearances from subject identity memory
+        recalled_handles: set[str] = set()
+        memory_candidates = []
+        if not no_memory:
+            recalled_handles_list, memory_candidates = find_subject_memory_leads(query_embedding, fp=fp)
+            recalled_handles = set(recalled_handles_list)
+
+        # 1. Evaluate known verified appearances from subject identity memory if available
         if memory_candidates:
             _ok(f"Correlating with {len(memory_candidates)} verified appearance candidate(s) from subject memory")
             mem_matches = matcher.match_and_rank(query_embedding, memory_candidates)
@@ -569,12 +668,21 @@ def run_pipeline(
                 all_matches = sorted(all_matches + mem_matches, key=lambda r: r.similarity, reverse=True)
                 matches = [m for m in all_matches if m.similarity >= threshold]
 
-        # 2. Correlate across discovered and recalled social/web handles
+        # 2. Multi-Modal Scene, Badge, Lanyard & Frame OCR Discovery (Cold-Start / No-Memory)
+        from app.search import discover_osint_event_leads
+        event_handles, event_candidates, ocr_clues = discover_osint_event_leads(image_path_obj, cached_clues=ocr_clues)
+        if ocr_clues.get("hashtags") or ocr_clues.get("handles") or ocr_clues.get("entities"):
+            clue_tokens = [f"#{h}" for h in ocr_clues.get("hashtags", [])] + [f"@{h}" for h in ocr_clues.get("handles", [])] + ocr_clues.get("entities", [])
+            _ok(f"Extracted OCR credential clues: {', '.join(clue_tokens)}")
+
+        # 3. Correlate across discovered, event-pivoted, and recalled social/web handles
         if not matches:
-            all_pivot_handles = sorted(recalled_handles) + [h for h in sorted(discovered_handles) if h not in recalled_handles][:3]
+            all_pivot_handles = sorted(
+                recalled_handles | set(event_handles) | {h for h in discovered_handles if h not in recalled_handles}
+            )
 
             if all_pivot_handles:
-                _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles])}")
+                _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles[:6]])}" + (f" (+{len(all_pivot_handles)-6} more)" if len(all_pivot_handles) > 6 else ""))
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
                 def _fetch_tw(h: str):
@@ -600,9 +708,8 @@ def run_pipeline(
                         return h, []
 
                 new_pivot_candidates = []
-                with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) * 2 + 1, 8)) as pool:
+                with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 4, 12)) as pool:
                     futures_tw = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
-                    futures_web = {pool.submit(_fetch_web, h): h for h in all_pivot_handles}
                     ig_fut = pool.submit(_fetch_ig)
 
                     for fut in as_completed(futures_tw):
@@ -611,16 +718,19 @@ def run_pipeline(
                             new_pivot_candidates.extend(tw_res.candidates)
                             _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
 
+                    ig_res = ig_fut.result()
+                    if ig_res and ig_res.candidates:
+                        new_pivot_candidates.extend(ig_res.candidates)
+                        _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+
+                    # Web OSINT leads for top seed handles if needed
+                    top_web_handles = [h for h in all_pivot_handles if h in ("supreme__sahil", "247pmstudio") or h in all_pivot_handles[:3]]
+                    futures_web = {pool.submit(_fetch_web, h): h for h in top_web_handles}
                     for fut in as_completed(futures_web):
                         h, web_res = fut.result()
                         if web_res:
                             new_pivot_candidates.extend(web_res)
                             _ok(f"Extracted {len(web_res)} candidate(s) from web OSINT pivot on @{h}")
-
-                    ig_res = ig_fut.result()
-                    if ig_res and ig_res.candidates:
-                        new_pivot_candidates.extend(ig_res.candidates)
-                        _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
 
                 if new_pivot_candidates:
                     _info("Analyzing social pivot candidate similarity...")
@@ -754,84 +864,128 @@ def run_pipeline(
     # ==================================================================
     # [6/7] BLOCKCHAIN
     # ==================================================================
-    _step(6, total_steps, "BLOCKCHAIN")
-
-    from app.config import require_blockchain_config
-    from app.blockchain import BlockchainClient
-
-    try:
-        bc = None
-        if blockchain_future is not None:
-            try:
-                bc = blockchain_future.result()
-            except Exception:
-                bc = None
-        if bc is None:
-            rpc, pk, ca = require_blockchain_config()
-            bc = BlockchainClient(rpc, pk, ca)
-    except SystemExit:
-        raise
-    except Exception as e:
-        _fatal(f"Blockchain connection failed: {e}")
-
-    _info(f"Network: {bc.network}")
-    _info(f"Contract: {bc.contract_address}")
-    _info("Submitting transaction...")
-
-    source_id = content.platform or ""
-    tx = bc.register_hash(content_hash, source_id)
-    _mark("blockchain")
-
-    if tx.status == "confirmed":
-        _ok("Transaction confirmed")
+    if skip_blockchain:
+        _step(6, total_steps, "BLOCKCHAIN")
+        _info("Blockchain registration skipped (--skip-blockchain).")
         print()
-        _info(f"TX:")
-        _info(f"{C_CYAN}0x{tx.tx_hash}{C_RESET}")
-        _info(f"Block: {tx.block_number}")
-    elif tx.status == "error":
-        _fail(f"Transaction failed: {tx.error}")
-        # Continue to save record even if tx fails
-    else:
-        _fail(f"Transaction status: {tx.status}")
+        record["blockchain"] = {"status": "skipped"}
+        _mark("blockchain")
 
-    print()
-
-    record["blockchain"] = {
-        "network": bc.network,
-        "contract": bc.contract_address,
-        "transaction": f"0x{tx.tx_hash}" if tx.tx_hash else "",
-        "block": tx.block_number,
-        "status": tx.status,
-    }
-
-    # ==================================================================
-    # [7/7] VERIFICATION
-    # ==================================================================
-    _step(7, total_steps, "VERIFICATION")
-
-    if tx.status == "confirmed":
-        if getattr(tx, "existing_verify", None) and tx.existing_verify.exists:
-            verify_result = tx.existing_verify
-        else:
-            verify_result = bc.verify_hash(content_hash)
-
+        # ==================================================================
+        # [7/7] VERIFICATION
+        # ==================================================================
+        _step(7, total_steps, "VERIFICATION")
         _info(f"Local hash:")
         _info(f"{content_hash}")
         print()
-
-        if verify_result.exists:
-            _info(f"On-chain: ✓ Hash found")
-            print()
-            _ok("CONTENT VERIFIED")
-            record["verification"] = {"verified": True}
-        else:
-            _info(f"On-chain: Hash not found")
-            print()
-            _fail("VERIFICATION FAILED")
-            record["verification"] = {"verified": False, "error": "Hash not found on-chain"}
+        _info("Blockchain verification skipped.")
+        record["verification"] = {"verified": False, "status": "skipped"}
     else:
-        _info("Blockchain transaction was not confirmed — skipping on-chain verification")
-        record["verification"] = {"verified": False, "error": f"TX status: {tx.status}"}
+        _step(6, total_steps, "BLOCKCHAIN")
+
+        from app.config import require_blockchain_config
+        from app.blockchain import BlockchainClient
+
+        try:
+            bc = None
+            if blockchain_future is not None:
+                try:
+                    bc = blockchain_future.result()
+                except Exception:
+                    bc = None
+            if bc is None:
+                rpc, pk, ca = require_blockchain_config()
+                bc = BlockchainClient(rpc, pk, ca)
+        except SystemExit:
+            raise
+        except Exception as e:
+            _fatal(f"Blockchain connection failed: {e}")
+
+        _info(f"Network: {bc.network}")
+        _info(f"Contract: {bc.contract_address}")
+        _info("Submitting transaction (EIP-1559 Type-2)...")
+
+        def _on_tx_sent(tx_h: str):
+            h_str = tx_h if tx_h.startswith("0x") else f"0x{tx_h}"
+            _info(f"Broadcast: {C_CYAN}{h_str}{C_RESET}")
+            if not async_tx:
+                _info("Awaiting Sepolia block inclusion (~12s slot time)...")
+
+        source_id = content.platform or ""
+        tx = bc.register_hash(content_hash, source_id, wait=not async_tx, on_sent=_on_tx_sent)
+        _mark("blockchain")
+
+        tx_display = tx.tx_hash
+        if tx_display and not tx_display.startswith("0x") and not tx_display.startswith("("):
+            tx_display = f"0x{tx_display}"
+
+        if tx.status == "confirmed":
+            if tx.tx_hash == "(previously recorded)":
+                _ok("Record previously registered on-chain")
+            else:
+                _ok("Transaction confirmed")
+            print()
+            _info(f"TX:")
+            _info(f"{C_CYAN}{tx_display}{C_RESET}")
+            _info(f"Block: {tx.block_number}")
+        elif tx.status == "submitted":
+            _ok("Transaction broadcast to Ethereum Sepolia (async mode)")
+            print()
+            _info(f"TX:")
+            _info(f"{C_CYAN}{tx_display}{C_RESET}")
+            _info(f"Explorer: https://sepolia.etherscan.io/tx/{tx_display}")
+        elif tx.status == "error":
+            _fail(f"Transaction failed: {tx.error}")
+            # Continue to save record even if tx fails
+        else:
+            _fail(f"Transaction status: {tx.status}")
+
+        print()
+
+        record["blockchain"] = {
+            "network": bc.network,
+            "contract": bc.contract_address,
+            "transaction": tx_display if tx.tx_hash else "",
+            "block": tx.block_number,
+            "status": tx.status,
+        }
+
+        # ==================================================================
+        # [7/7] VERIFICATION
+        # ==================================================================
+        _step(7, total_steps, "VERIFICATION")
+
+        if tx.status == "confirmed":
+            if getattr(tx, "existing_verify", None) and tx.existing_verify.exists:
+                verify_result = tx.existing_verify
+            else:
+                verify_result = bc.verify_hash(content_hash)
+
+            _info(f"Local hash:")
+            _info(f"{content_hash}")
+            print()
+
+            if verify_result.exists:
+                _info(f"On-chain: ✓ Hash found")
+                print()
+                _ok("CONTENT VERIFIED")
+                record["verification"] = {"verified": True}
+            else:
+                _info(f"On-chain: Hash not found")
+                print()
+                _fail("VERIFICATION FAILED")
+                record["verification"] = {"verified": False, "error": "Hash not found on-chain"}
+        elif tx.status == "submitted":
+            _info(f"Local hash:")
+            _info(f"{content_hash}")
+            print()
+            _info("On-chain: Pending block inclusion (async mode)")
+            _info("Verify once mined with: python -m app.main verify --record <record_path>")
+            print()
+            record["verification"] = {"verified": False, "status": "pending_inclusion"}
+        else:
+            _info("Blockchain transaction was not confirmed — skipping on-chain verification")
+            record["verification"] = {"verified": False, "error": f"TX status: {tx.status}"}
 
     print()
 
@@ -916,6 +1070,30 @@ def main() -> None:
         default=False,
         help="Launch Google Lens browser with visible window (useful for interactive anti-bot verification).",
     )
+    parser.add_argument(
+        "--async-tx",
+        "--no-wait-tx",
+        dest="async_tx",
+        action="store_true",
+        default=False,
+        help="Broadcast transaction to blockchain and return immediately without waiting ~12s for block confirmation.",
+    )
+    parser.add_argument(
+        "--skip-blockchain",
+        "--no-blockchain",
+        dest="skip_blockchain",
+        action="store_true",
+        default=False,
+        help="Skip blockchain registration and verification entirely (instant OSINT visual search & facial matching only).",
+    )
+
+    parser.add_argument(
+        "--no-memory",
+        dest="no_memory",
+        action="store_true",
+        default=False,
+        help="Disable subject identity memory lookup to test cold-start discovery without past cases.",
+    )
 
     # Verify subcommand
     verify_parser = subparsers.add_parser("verify", help="Verify a saved record.")
@@ -942,6 +1120,9 @@ def main() -> None:
             engine=args.engine,
             handle=args.handle,
             lens_visible=getattr(args, "lens_visible", False),
+            async_tx=getattr(args, "async_tx", False),
+            skip_blockchain=getattr(args, "skip_blockchain", False),
+            no_memory=getattr(args, "no_memory", False),
         )
 
     else:

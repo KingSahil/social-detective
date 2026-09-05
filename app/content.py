@@ -160,7 +160,17 @@ class ContentRetriever:
 
         # Download the actual image bytes (for content hashing)
         try:
-            img_resp = requests.get(image_url, timeout=self._timeout)
+            img_headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            }
+            if source_url:
+                img_headers["Referer"] = source_url
+            img_resp = requests.get(image_url, headers=img_headers, timeout=self._timeout)
             img_resp.raise_for_status()
             content.image_bytes = img_resp.content
         except Exception:

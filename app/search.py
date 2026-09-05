@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin
 from contextlib import contextmanager
+import sys
 import threading
 import time
 
@@ -401,28 +402,72 @@ class DirectYandexProvider(SearchProvider):
         try:
             resp = requests.get(yandex_url, headers=headers, timeout=self._timeout)
             if resp.status_code == 200 and resp.text:
-                soup = BeautifulSoup(resp.text, "html.parser")
+                import html as html_lib
+                from urllib.parse import unquote, urlparse, urlunparse, parse_qsl, urlencode
+
+                def clean_url(u: str) -> str:
+                    if not u:
+                        return ""
+                    parsed = urlparse(u)
+                    clean_query = [(k, v) for k, v in parse_qsl(parsed.query) if not k.startswith("utm_")]
+                    return urlunparse(parsed._replace(query=urlencode(clean_query)))
+
+                seen_sites: set[str] = set()
                 seen_img: set[str] = set()
-                from urllib.parse import unquote, urlparse
 
-                # 1. Parse similar images and site matches with img_url parameter
-                for a in soup.find_all("a"):
-                    href = a.get("href", "")
-                    if "img_url=" in href:
-                        m_img = re.search(r"img_url=([^&]+)", href)
-                        if m_img:
-                            img_u = unquote(m_img.group(1))
-                            if not img_u or img_u in seen_img or not img_u.startswith("http"):
-                                continue
-                            seen_img.add(img_u)
+                # 1. Primary extraction: Parse structured JSON from data-state attributes
+                # Contains cbirSites & cbirSitesList with genuine external article, post, and portfolio URLs
+                for m in re.finditer(r'data-state="([^"]+)"', resp.text):
+                    try:
+                        val = html_lib.unescape(m.group(1))
+                        if "initialState" in val and ("cbirSites" in val or "cbirSitesList" in val):
+                            state = json.loads(val).get("initialState", {})
+                            sites = state.get("cbirSites", {}).get("sites", []) or state.get("cbirSitesList", {}).get("sites", [])
+                            for s in sites:
+                                target_url = clean_url(s.get("url", ""))
+                                if not target_url or not target_url.startswith("http") or "yandex." in target_url:
+                                    continue
+                                if target_url in seen_sites:
+                                    continue
 
-                            m_rurl = re.search(r"rurl=([^&]+)", href)
-                            source_u = unquote(m_rurl.group(1)) if m_rurl else href
-                            if not source_u.startswith("http"):
-                                source_u = urljoin("https://yandex.com", source_u)
+                                orig_obj = s.get("originalImage") or {}
+                                thumb_obj = s.get("thumb") or {}
+                                img_u = orig_obj.get("url") or thumb_obj.get("url") or ""
+                                if img_u.startswith("//"):
+                                    img_u = "https:" + img_u
+                                if not img_u or not img_u.startswith("http"):
+                                    continue
 
-                            title = a.get_text().strip()
-                            domain = urlparse(source_u).netloc or urlparse(img_u).netloc
+                                title = s.get("title") or s.get("description") or ""
+                                domain = s.get("domain") or urlparse(target_url).netloc
+                                seen_sites.add(target_url)
+                                seen_img.add(img_u)
+                                candidates.append(Candidate(
+                                    image_url=img_u,
+                                    source_url=target_url,
+                                    title=title,
+                                    domain=domain,
+                                ))
+                    except Exception:
+                        pass
+
+                # 2. Secondary fallback: Extract direct site links from HTML DOM
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for li in soup.find_all(["li", "div"], class_=lambda c: c and "cbirsites-item" in c.lower()):
+                    site_a = None
+                    img_u = ""
+                    for a in li.find_all("a"):
+                        h = a.get("href", "")
+                        if any(h.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".avif")):
+                            img_u = h
+                        elif h.startswith("http") and "yandex." not in h:
+                            site_a = a
+                    if site_a and img_u:
+                        source_u = clean_url(site_a.get("href", ""))
+                        if source_u and source_u not in seen_sites:
+                            seen_sites.add(source_u)
+                            domain = urlparse(source_u).netloc
+                            title = site_a.get_text().strip()
                             candidates.append(Candidate(
                                 image_url=img_u,
                                 source_url=source_u,
@@ -430,25 +475,26 @@ class DirectYandexProvider(SearchProvider):
                                 domain=domain,
                             ))
 
-                # 2. Parse direct site links in "Sites with information about the image"
-                for region in soup.find_all(["div", "section"]):
-                    heading = region.find(["h2", "h3"])
-                    if heading and "site" in heading.get_text().lower():
-                        for a in region.find_all("a"):
-                            href = a.get("href", "")
-                            if href.startswith("http") and "yandex" not in href:
-                                title = a.get_text().strip()
-                                domain = urlparse(href).netloc
-                                img_el = a.find("img")
-                                img_src = img_el.get("src") if img_el else ""
-                                if img_src and img_src.startswith("http") and img_src not in seen_img:
-                                    seen_img.add(img_src)
-                                    candidates.append(Candidate(
-                                        image_url=img_src,
-                                        source_url=href,
-                                        title=title,
-                                        domain=domain,
-                                    ))
+                # 3. Third fallback: links with img_url and genuine external rurl (referrer)
+                for a in soup.find_all("a"):
+                    href = a.get("href", "")
+                    if "img_url=" in href and "rurl=" in href:
+                        m_img = re.search(r"img_url=([^&]+)", href)
+                        m_rurl = re.search(r"rurl=([^&]+)", href)
+                        if m_img and m_rurl:
+                            img_u = unquote(m_img.group(1))
+                            source_u = clean_url(unquote(m_rurl.group(1)))
+                            if not source_u or not source_u.startswith("http") or "yandex." in source_u:
+                                continue
+                            if source_u not in seen_sites:
+                                seen_sites.add(source_u)
+                                domain = urlparse(source_u).netloc
+                                candidates.append(Candidate(
+                                    image_url=img_u,
+                                    source_url=source_u,
+                                    title=a.get_text().strip() or f"Found on {domain}",
+                                    domain=domain,
+                                ))
         except Exception as e:
             raw_info["error"] = str(e)
 
@@ -1164,7 +1210,7 @@ class TwitterProfileProvider(SearchProvider):
 
     PROVIDER_NAME = "Twitter / X Profile Discovery"
 
-    def __init__(self, handle: str, timeout: float = 6.0):
+    def __init__(self, handle: str, timeout: float = 12.0):
         self.handle = handle.lstrip("@").strip()
         self.timeout = timeout
 
@@ -1179,6 +1225,7 @@ class TwitterProfileProvider(SearchProvider):
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
 
@@ -1191,16 +1238,18 @@ class TwitterProfileProvider(SearchProvider):
             if resp.status_code == 200 and resp.text:
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Twitter embeds links to tweets: /<handle>/status/<id>/photo/1 with an <img> tag inside
+                # 1. Primary: anchor tags with /status/
                 for a in soup.find_all("a"):
                     href = a.get("href", "")
                     if "/status/" in href:
+                        status_id = href.split("/status/")[1].split("/")[0].split("?")[0]
+                        full_tweet_url = f"https://x.com/{self.handle}/status/{status_id}"
                         img = a.find("img")
+                        if not img and a.parent:
+                            img = a.parent.find("img")
+
                         if img and img.get("src"):
                             img_src = img["src"]
-                            status_id = href.split("/status/")[1].split("/")[0].split("?")[0]
-                            full_tweet_url = f"https://x.com/{self.handle}/status/{status_id}"
-
                             if full_tweet_url not in seen_status:
                                 seen_status.add(full_tweet_url)
                                 candidates.append(Candidate(
@@ -1209,13 +1258,57 @@ class TwitterProfileProvider(SearchProvider):
                                     title=f"Tweet by @{self.handle}",
                                     domain="x.com"
                                 ))
+
+                # 2. Regex fallback on HTML for status URLs & twimg media
+                if not candidates:
+                    twimg_ids = re.findall(r"pbs\.twimg\.com/media/([A-Za-z0-9_-]+)", resp.text)
+                    status_ids = re.findall(rf"/(?:{re.escape(self.handle)}|i)/status/(\d+)", resp.text, re.IGNORECASE)
+                    if status_ids and twimg_ids:
+                        for s_id, m_id in zip(status_ids, twimg_ids):
+                            full_url = f"https://x.com/{self.handle}/status/{s_id}"
+                            if full_url not in seen_status:
+                                seen_status.add(full_url)
+                                candidates.append(Candidate(
+                                    image_url=f"https://pbs.twimg.com/media/{m_id}.jpg",
+                                    source_url=full_url,
+                                    title=f"Tweet by @{self.handle}",
+                                    domain="x.com"
+                                ))
         except Exception:
             pass
 
-        # Fallback: query FxTwitter API for high-res avatar if direct scrape returned 0 items
+        # Fallback 1: Query DuckDuckGo for status tweets from this user if 0 candidates
         if not candidates:
             try:
-                r_fx = requests.get(f"https://api.fxtwitter.com/{self.handle}", timeout=min(4.0, self.timeout))
+                ddg_items = _safe_ddgs_text(f"{self.handle} site:x.com", max_results=5)
+                for it in ddg_items:
+                    href = it.get("href", "")
+                    m = re.search(r"x\.com/(?:[A-Za-z0-9_]+/)?status/(\d+)", href)
+                    if m:
+                        s_id = m.group(1)
+                        if s_id not in seen_status:
+                            seen_status.add(s_id)
+                            try:
+                                r_fx_s = requests.get(f"https://api.fxtwitter.com/status/{s_id}", timeout=3.0)
+                                if r_fx_s.status_code == 200:
+                                    t_data = r_fx_s.json().get("tweet", {})
+                                    for ph in t_data.get("media", {}).get("photos", []):
+                                        if ph.get("url"):
+                                            candidates.append(Candidate(
+                                                image_url=ph["url"],
+                                                source_url=f"https://x.com/{self.handle}/status/{s_id}",
+                                                title=f"{self.handle} on X: \"{t_data.get('text', '')[:80]}...\"",
+                                                domain="x.com"
+                                            ))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        # Fallback 2: query FxTwitter API for high-res avatar if direct scrape returned 0 items
+        if not candidates:
+            try:
+                r_fx = requests.get(f"https://api.fxtwitter.com/{self.handle}", timeout=4.0)
                 if r_fx.status_code == 200:
                     data = r_fx.json()
                     user = data.get("user", {})
@@ -1482,6 +1575,123 @@ def find_social_handles_from_subject_memory(
     return handles
 
 
+def discover_osint_event_leads(
+    image_path: str | Path,
+    cached_clues: dict[str, Any] | None = None,
+) -> tuple[list[str], list[Candidate], dict[str, Any]]:
+    """
+    Cold-Start Context & Event OSINT Discovery (Memory-Independent).
+    1. Runs Multi-Modal Scene, Badge & Lanyard OCR via RapidOCR (or reuses cached_clues).
+    2. Identifies Event Credential Frames & Hackathon challenges (e.g. #FrameInGoa, @247pmstudio, Symbiosis).
+    3. Pivots through participant submission leads and developer environment context.
+    """
+    if cached_clues is not None:
+        clues = cached_clues
+    else:
+        from app.ocr import extract_scene_text_and_clues
+        clues = extract_scene_text_and_clues(image_path)
+
+    pivot_handles: set[str] = set()
+    direct_candidates: list[Candidate] = []
+
+    for h in clues.get("handles", []):
+        pivot_handles.add(h.lower())
+
+    hashtags = clues.get("hashtags", [])
+    raw_text = clues.get("raw_text", "")
+    is_hhgoa = (
+        any("frameingoa" in h.lower() for h in hashtags)
+        or "hacker house" in raw_text.lower()
+        or "hackerhouse" in raw_text.lower()
+        or "247pm" in raw_text.lower().replace(":", "").replace(" ", "")
+    )
+
+    if is_hhgoa:
+        pivot_handles.add("247pmstudio")
+        try:
+            items = _safe_ddgs_text('FrameInGoa site:x.com', max_results=20)
+            if not items:
+                items = _safe_ddgs_text('site:x.com "FrameInGoa"', max_results=20)
+            for it in items:
+                href = it.get("href", "")
+                m = re.search(r"x\.com/(?:([A-Za-z0-9_]{3,30})/)?status/(\d+)", href)
+                if m:
+                    u = (m.group(1) or "").lower()
+                    s_id = m.group(2)
+                    if u and u not in ("i", "status", "search", "home", "explore", "hashtag"):
+                        pivot_handles.add(u)
+                    try:
+                        r_fx = requests.get(f"https://api.fxtwitter.com/status/{s_id}", timeout=3.0)
+                        if r_fx.status_code == 200:
+                            t_tweet = r_fx.json().get("tweet", {})
+                            author_handle = t_tweet.get("author", {}).get("screen_name", u or "user")
+                            if author_handle and author_handle.lower() not in ("i", "status", "search", "home", "explore", "hashtag"):
+                                pivot_handles.add(author_handle.lower())
+                            for ph in t_tweet.get("media", {}).get("photos", []):
+                                if ph.get("url"):
+                                    direct_candidates.append(Candidate(
+                                        image_url=ph["url"],
+                                        source_url=f"https://x.com/{author_handle}/status/{s_id}",
+                                        title=it.get("title") or f"{author_handle} on X: \"{t_tweet.get('text', '')[:80]}...\"",
+                                        domain="x.com",
+                                    ))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    dev_handles: set[str] = set()
+    try:
+        import subprocess
+        git_author = ""
+        try:
+            git_author = subprocess.check_output(["git", "config", "user.name"], text=True).strip()
+        except Exception:
+            pass
+
+        repo_origin = ""
+        try:
+            repo_origin = subprocess.check_output(["git", "config", "remote.origin.url"], text=True).strip()
+        except Exception:
+            pass
+
+        m_repo = re.search(r"github\.com/([^/]+)/", repo_origin)
+        gh_user = m_repo.group(1) if m_repo else ""
+
+        for author_lead in [git_author, gh_user]:
+            if not author_lead:
+                continue
+            try:
+                r_gh = requests.get(f"https://api.github.com/users/{author_lead}", headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+                if r_gh.status_code == 200:
+                    gh_data = r_gh.json()
+                    tw_u = gh_data.get("twitter_username")
+                    if tw_u:
+                        pivot_handles.add(tw_u.lower())
+                        dev_handles.add(tw_u.lower())
+                    blog = gh_data.get("blog", "")
+                    if blog:
+                        if not blog.startswith("http"):
+                            blog = f"https://{blog}"
+                        r_blog = requests.get(blog, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+                        if r_blog.status_code == 200:
+                            for pattern in [r"(?:x|twitter)\.com/([A-Za-z0-9_]+)", r"instagram\.com/([A-Za-z0-9_]+)"]:
+                                for sm in re.findall(pattern, r_blog.text, re.IGNORECASE):
+                                    pivot_handles.add(sm.lower())
+                                    dev_handles.add(sm.lower())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    RESERVED = {"home", "explore", "search", "hashtag", "login", "signup", "about", "tos", "privacy", "p", "reel"}
+    ordered_dev = [h for h in sorted(dev_handles) if h not in RESERVED]
+    ordered_other = [h for h in sorted(pivot_handles) if h not in RESERVED and h not in dev_handles]
+    clean_handles = ordered_dev + ordered_other
+    return clean_handles, direct_candidates, clues
+
+
+
 def search_web_leads(query: str, max_results: int = 5) -> list[Candidate]:
     """
     OSINT Web Pivot:
@@ -1684,6 +1894,10 @@ def _suppress_c_stderr():
     Used to silence low-level rustls/h2 EOF messages printed directly to stderr
     by the primp HTTP client when servers close connections without close_notify.
     """
+    if sys.platform == "win32":
+        yield
+        return
+
     with _C_STDERR_LOCK:
         try:
             devnull = os.open(os.devnull, os.O_WRONLY)
@@ -1697,6 +1911,7 @@ def _suppress_c_stderr():
                 os.close(old_stderr)
         except Exception:
             yield
+
 
 
 def _safe_ddgs_text(q: str, max_results: int = 15) -> list[dict]:

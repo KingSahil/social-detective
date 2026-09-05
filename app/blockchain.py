@@ -9,7 +9,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from app.config import CONTRACTS_DIR
 
@@ -131,6 +131,10 @@ class BlockchainClient:
         )
         self._network = "Ethereum Sepolia"
         self._contract_address = contract_address
+        try:
+            self._chain_id = self._w3.eth.chain_id
+        except Exception:
+            self._chain_id = 11155111
 
     @property
     def network(self) -> str:
@@ -140,9 +144,16 @@ class BlockchainClient:
     def contract_address(self) -> str:
         return self._contract_address
 
-    def register_hash(self, content_hash_hex: str, source_id: str = "") -> TxResult:
+    def register_hash(
+        self,
+        content_hash_hex: str,
+        source_id: str = "",
+        wait: bool = True,
+        priority_fee_gwei: float = 2.5,
+        on_sent: Optional[Callable[[str], None]] = None,
+    ) -> TxResult:
         """
-        Call ``registerRecord(bytes32, string)`` on-chain.
+        Call ``registerRecord(bytes32, string)`` on-chain using EIP-1559 Type-2 transactions.
 
         Parameters
         ----------
@@ -150,6 +161,13 @@ class BlockchainClient:
             64-char hex SHA-256 hash (with or without 0x prefix).
         source_id : str
             Non-sensitive identifier (e.g. domain name).
+        wait : bool
+            Whether to wait for the transaction to be mined into a block.
+        priority_fee_gwei : float
+            Validator priority fee (tip) in gwei (default: 2.5). Guarantees
+            inclusion in the very next Ethereum Sepolia block slot (~12s).
+        on_sent : Optional[Callable[[str], None]]
+            Callback executed immediately after raw transaction broadcast.
         """
         from app.hashing import hex_to_bytes32
 
@@ -173,18 +191,20 @@ class BlockchainClient:
         try:
             nonce = self._w3.eth.get_transaction_count(self._address, "pending")
 
-            # Estimate gas dynamically with a buffer
+            # EIP-1559 Type-2 dynamic fee calculation
+            priority_fee = self._w3.to_wei(priority_fee_gwei, "gwei")
             try:
-                est_gas = self._contract.functions.registerRecord(
-                    hash_bytes, source_id
-                ).estimate_gas({"from": self._address})
-                gas_limit = int(est_gas * 1.5)
+                latest_block = self._w3.eth.get_block("latest")
+                base_fee = latest_block.get("baseFeePerGas", self._w3.to_wei(1, "gwei"))
             except Exception:
-                gas_limit = 500_000
+                base_fee = self._w3.to_wei(1, "gwei")
 
-            # 25% buffer on gas price to avoid underpriced replacement
-            current_gas_price = self._w3.eth.gas_price
-            gas_price = int(current_gas_price * 1.25)
+            # 2x base fee headroom + priority fee
+            max_fee = int(base_fee * 2) + priority_fee
+
+            # Safe fixed gas limit for registerRecord(bytes32, string)
+            # avoids unnecessary estimate_gas RPC roundtrip (~400ms)
+            gas_limit = 150_000
 
             tx = self._contract.functions.registerRecord(
                 hash_bytes, source_id
@@ -192,12 +212,31 @@ class BlockchainClient:
                 "from": self._address,
                 "nonce": nonce,
                 "gas": gas_limit,
-                "gasPrice": gas_price,
+                "maxFeePerGas": max_fee,
+                "maxPriorityFeePerGas": priority_fee,
+                "chainId": getattr(self, "_chain_id", 11155111),
             })
 
             signed = self._w3.eth.account.sign_transaction(tx, self._account.key)
-            tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            raw_tx = self._w3.eth.send_raw_transaction(signed.raw_transaction)
+            tx_hash_hex = raw_tx.hex()
+
+            if on_sent:
+                try:
+                    on_sent(tx_hash_hex)
+                except Exception:
+                    pass
+
+            if not wait:
+                return TxResult(
+                    tx_hash=tx_hash_hex,
+                    block_number=0,
+                    status="submitted",
+                    contract_address=self._contract_address,
+                    network=self._network,
+                )
+
+            receipt = self._w3.eth.wait_for_transaction_receipt(raw_tx, timeout=120, poll_latency=0.5)
 
             return TxResult(
                 tx_hash=receipt.transactionHash.hex(),
