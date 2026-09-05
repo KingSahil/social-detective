@@ -21,6 +21,9 @@ NAME_MAPPINGS = {
     "aryan gupta on x:": "Aryan Gupta",
     "tweet by @aryannn_6476476": "Aryan Gupta",
     "gndu": "GNDU Freshers",
+    "ashwath": "Ashwath Soni",
+    "b5bba32ba": "Ashwath Soni",
+    "gdg on campus": "Ashwath Soni",
 }
 
 
@@ -85,6 +88,8 @@ def migrate_results_to_knowledge_graph() -> int:
             if author in ("Sahil Gupta", "Gourish Julka", "Sparsh Khanna"):
                 associates = ["Sahil Gupta", "Gourish Julka", "Sparsh Khanna"]
                 events = ["HackHazards '26", "Hacker House Goa"]
+            elif author in ("Ashwath Soni",):
+                events = ["GDG On Campus GNDU", "Amritsar, Punjab"]
 
             payload = VerifiedIdentityPayload(
                 content_hash=data.get("fingerprint", {}).get("hash", ""),

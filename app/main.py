@@ -232,7 +232,7 @@ def run_pipeline(
             _ok(f"Extracted OCR credential clues: {', '.join(clue_tokens)}")
 
         from app.geo import analyze_image_geolocation
-        geo_res = analyze_image_geolocation(image_path_obj, cached_ocr_clues=ocr_clues)
+        geo_res = analyze_image_geolocation(image_path_obj, cached_ocr_clues=ocr_clues, context=context)
         record["geolocation"] = {
             "detected": geo_res.detected,
             "location": geo_res.location_name,
@@ -683,12 +683,14 @@ def run_pipeline(
             pass
 
     # If subject identity memory is active, check memory leads too
+    matched_kg_person = None
     if not no_memory:
         try:
             from app.memory.graph import IdentityKnowledgeGraph
             kg = IdentityKnowledgeGraph()
             kg_person, kg_sim = kg.find_nearest_person(query_embedding, threshold=0.65)
             if kg_person:
+                matched_kg_person = kg_person
                 _ok(f"Correlated with Web3-verified subject: {kg_person.name} ({kg_sim*100:.1f}%)")
                 kg_cands = kg.get_appearance_candidates(kg_person)
                 if kg_cands:
@@ -1098,6 +1100,46 @@ def run_pipeline(
     if getattr(content, "author", None) and "match" in record:
         record["match"]["author"] = content.author
     _mark("content")
+
+    # GEOINT Corroboration: Resolve location from confirmed identity & digital footprint if undetermined
+    geo_current = record.get("geolocation", {})
+    if not geo_current.get("detected"):
+        try:
+            from app.geo import corroborate_geolocation_from_metadata
+            events_to_check = []
+            if "matched_kg_person" in locals() and matched_kg_person:
+                events_to_check.extend(matched_kg_person.events)
+            author_val = getattr(content, "author", "") or (record.get("match", {}).get("author", ""))
+            corroborated_geo = corroborate_geolocation_from_metadata(
+                source_url=content.source_url or best.candidate.source_url,
+                title=content.title or best.candidate.title,
+                text=content.text,
+                author=author_val or (matched_kg_person.name if ("matched_kg_person" in locals() and matched_kg_person) else ""),
+                domain=best.candidate.domain,
+                events=events_to_check,
+            )
+            if corroborated_geo:
+                record["geolocation"] = {
+                    "detected": corroborated_geo.detected,
+                    "location": corroborated_geo.location_name,
+                    "country": corroborated_geo.country,
+                    "region": corroborated_geo.region,
+                    "city": corroborated_geo.city,
+                    "coordinates": corroborated_geo.coordinates,
+                    "map_url": corroborated_geo.map_url,
+                    "confidence": corroborated_geo.confidence,
+                    "reasoning": corroborated_geo.reasoning,
+                }
+                _ok(f"GEOINT Corroboration: {corroborated_geo.location_name}")
+                if corroborated_geo.coordinates:
+                    lat, lon = corroborated_geo.coordinates
+                    _info(f"Coords: {lat:.4f}° N, {lon:.4f}° E  (Map: {corroborated_geo.map_url})")
+                _info(f"Confidence: {corroborated_geo.confidence}")
+                for feat in corroborated_geo.terrain_features:
+                    _info(f"Scene Cue: {feat}")
+                print()
+        except Exception:
+            pass
 
     # ==================================================================
     # [5/7] FINGERPRINT

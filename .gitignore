@@ -55,3 +55,7 @@ lens_*.html
 lens_*.png
 scratch/
 data/memory/ipfs_cache/
+
+# Decentralized memory local storage
+data/memory/knowledge_graph.json
+data/memory/ipfs_cache/
