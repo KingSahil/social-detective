@@ -2019,11 +2019,13 @@ class InstagramProfileProvider(SearchProvider):
         api_key: str | None = None,
         timeout: float = 6.0,
         allow_free: bool = False,
+        use_browser: bool = False,
     ):
         self.handle = handle.lstrip("@").strip() if handle else None
         self._api_key = api_key
         self._timeout = timeout
         self._allow_free = allow_free
+        self._use_browser = use_browser
 
         if not self._allow_free and (not self._api_key or self._api_key.strip() == "" or "your_" in self._api_key):
             raise RuntimeError(
@@ -2062,7 +2064,51 @@ class InstagramProfileProvider(SearchProvider):
         clean_handles = [h for h in clean_handles if h.lower() not in {"popular", "instagram", "posts", "post"}]
         clean_handles = clean_handles[:max_handles]
 
-        # Build initial queries
+        candidates: list[Candidate] = []
+
+        # 1. Fast direct profile probe for each handle when browser scraping is enabled
+        if self._use_browser:
+            for h in clean_handles:
+                # Fast headless browser render for profile avatar + public post thumbnails
+                try:
+                    from playwright.sync_api import sync_playwright
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True)
+                        page = browser.new_page()
+                        page.goto(f"https://www.instagram.com/{h}/", timeout=8000)
+                        page.wait_for_timeout(2000)
+                        imgs = page.locator("img").all()
+                        for img in imgs[:12]:
+                            src = img.get_attribute("src")
+                            alt = img.get_attribute("alt") or ""
+                            if src and ("cdninstagram" in src or "fbcdn" in src):
+                                candidates.append(Candidate(
+                                    image_url=src,
+                                    source_url=f"https://www.instagram.com/{h}/",
+                                    title=f"@{h} on Instagram" + (f": {alt[:50]}" if alt else ""),
+                                    domain="instagram.com",
+                                ))
+                        browser.close()
+                except Exception:
+                    # Fast HTTP metadata probe fallback
+                    try:
+                        tp = TargetURLProvider(f"https://www.instagram.com/{h}/", timeout=6.0)
+                        tp_res = tp.search()
+                        if tp_res and tp_res.candidates:
+                            candidates.extend(tp_res.candidates)
+                    except Exception:
+                        pass
+
+            # If direct profile probe already discovered candidate photos, return immediately
+            if candidates:
+                return SearchResult(
+                    candidates=candidates,
+                    provider=self.PROVIDER_NAME,
+                    searched_at=timestamp,
+                    raw_response={"handle_count": len(clean_handles), "image_count": len(candidates)},
+                )
+
+        # Build initial search engine dork queries if direct probe returned no images
         queries: list[str] = []
         for h in clean_handles:
             queries.append(f"site:instagram.com {h}")
@@ -2198,13 +2244,14 @@ class InstagramProfileProvider(SearchProvider):
                     discovered_shortcodes.update(codes)
 
         # Now unpack discovered shortcodes into Candidates (including carousels)
-        candidates: list[Candidate] = []
-
         def _unpack_shortcode(sc: str) -> list[Candidate]:
             items: list[Candidate] = []
             try:
                 import instaloader
-                L = instaloader.Instaloader()
+                L = instaloader.Instaloader(
+                    max_connection_attempts=1,
+                    fatal_status_codes=[429, 401, 403, 404],
+                )
                 post = instaloader.Post.from_shortcode(L.context, sc)
                 caption = (post.caption or "").strip()
                 caption_snip = caption[:80].replace("\n", " ")

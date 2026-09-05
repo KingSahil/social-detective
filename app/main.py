@@ -287,8 +287,22 @@ def run_pipeline(
         _step(2, total_steps, "TARGET MEDIA DISCOVERY")
         from app.search import TargetURLProvider
 
-        search_provider = TargetURLProvider(target_url=target)
-        _info(f"Target: {C_CYAN}{target}{C_RESET}")
+        # Normalize target URL if missing protocol or if passed as a platform/username
+        norm_target = target.strip()
+        if not norm_target.startswith(("http://", "https://")):
+            if norm_target.startswith("instagram.com/") or norm_target.startswith("www.instagram.com/"):
+                norm_target = f"https://{norm_target}"
+            elif norm_target.lower() in ("instagram", "insta", "ig") and handle:
+                norm_target = f"https://www.instagram.com/{handle.lstrip('@')}/"
+            elif norm_target.startswith("x.com/") or norm_target.startswith("twitter.com/"):
+                norm_target = f"https://{norm_target}"
+            elif norm_target.lower() in ("twitter", "x") and handle:
+                norm_target = f"https://x.com/{handle.lstrip('@')}"
+            else:
+                norm_target = f"https://www.instagram.com/{norm_target.lstrip('@')}/"
+
+        search_provider = TargetURLProvider(target_url=norm_target)
+        _info(f"Target: {C_CYAN}{norm_target}{C_RESET}")
         _info("Extracting candidate media images...")
 
         try:
@@ -354,8 +368,8 @@ def run_pipeline(
         def _search_instagram() -> list[Candidate]:
             try:
                 api_key = require_search_config(optional=True)
-                ig = InstagramProfileProvider(api_key=api_key, allow_free=True)
-                res = ig.search_handles([clean_handle])
+                ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True, use_browser=True)
+                res = ig_prov.search_handles([clean_handle])
                 return res.candidates if res else []
             except Exception:
                 return []
@@ -573,7 +587,7 @@ def run_pipeline(
 
                 def _fetch_ig():
                     try:
-                        ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
+                        ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True, use_browser=True)
                         from app.search import extract_associate_network_leads
                         _, contexts = extract_associate_network_leads()
                         return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
@@ -845,7 +859,7 @@ def run_pipeline(
 
                 def _fetch_ig():
                     try:
-                        ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
+                        ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True, use_browser=True)
                         contexts = []
                         if not no_memory:
                             from app.search import extract_associate_network_leads
@@ -1216,7 +1230,6 @@ def run_pipeline(
         try:
             from app.memory.ipfs import IPFSClient, VerifiedIdentityPayload
             from app.memory.graph import IdentityKnowledgeGraph
-            from datetime import datetime, timezone
             ipfs_cli = IPFSClient()
             payload = VerifiedIdentityPayload(
                 content_hash=content_hash,
