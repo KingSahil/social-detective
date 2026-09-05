@@ -487,8 +487,7 @@ class HeadlessLensProvider(SearchProvider):
         self.headless = headless
         self.timeout = timeout
         if user_data_dir is None:
-            import tempfile
-            self.user_data_dir = Path(tempfile.gettempdir()) / "social_detective_lens_profile"
+            self.user_data_dir = None
         else:
             self.user_data_dir = Path(user_data_dir).resolve()
         self.fallback_on_captcha = fallback_on_captcha
@@ -581,18 +580,22 @@ class HeadlessLensProvider(SearchProvider):
                     timeout=self.timeout,
                 )
             location = resp.headers.get("Location")
-            if location and "vsint=" in location:
-                full_vsint = self._make_full_photo_vsint(img_width, img_height)
-                location = re.sub(r'vsint=[^&]+', f'vsint={full_vsint}', location)
         except Exception as e:
             raw_info["upload_error"] = str(e)
 
         # 2. Render search results page via offscreen Chrome
         html = ""
         if location:
+            temp_dir_obj = None
             try:
                 from playwright.sync_api import sync_playwright
-                self.user_data_dir.mkdir(parents=True, exist_ok=True)
+                if self.user_data_dir is None:
+                    import tempfile
+                    temp_dir_obj = tempfile.TemporaryDirectory(prefix="social_detective_lens_")
+                    profile_dir = Path(temp_dir_obj.name)
+                else:
+                    profile_dir = self.user_data_dir
+                profile_dir.mkdir(parents=True, exist_ok=True)
 
                 args = [
                     "--disable-blink-features=AutomationControlled",
@@ -622,7 +625,7 @@ class HeadlessLensProvider(SearchProvider):
                     else:
                         launch_kwargs["channel"] = "chrome"
                     context = p.chromium.launch_persistent_context(
-                        user_data_dir=str(self.user_data_dir),
+                        user_data_dir=str(profile_dir),
                         **launch_kwargs,
                         headless=False,
                         ignore_default_args=["--enable-automation"],
@@ -654,118 +657,123 @@ class HeadlessLensProvider(SearchProvider):
                         context.add_cookies(cookies_to_add)
 
                     page.goto(location, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
-                    try:
-                        page.wait_for_selector("div[data-item-id], [jsname], script, img", timeout=1200)
-                    except Exception:
-                        pass
-
-                    # Readjust search crop area if Google Lens auto-contracted onto a sub-object
-                    try:
-                        boxes = page.evaluate("""() => {
-                            const img = document.querySelector('img.fHp7ze') || document.querySelector('div.UNBEIe img') || document.querySelector('img[src^="data:image"]') || document.querySelector('img');
-                            const tl = document.querySelector('div.pklMG.h1wbAd') || document.querySelector('[aria-label*="Top-left corner"]');
-                            const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
-                            if (!img || !tl || !br) return null;
-
-                            const tlAria = tl.getAttribute('aria-label') || '';
-                            const brAria = br.getAttribute('aria-label') || '';
-                            const isContracted = (!tlAria.includes('left 0%') || !tlAria.includes('top 0%') ||
-                                                  !brAria.includes('right 100%') || !brAria.includes('bottom 100%'));
-
-                            const ib = img.getBoundingClientRect();
-                            const tlb = tl.getBoundingClientRect();
-                            const brb = br.getBoundingClientRect();
-                            return {
-                                isContracted: isContracted,
-                                img: { x: ib.x, y: ib.y, width: ib.width, height: ib.height },
-                                tl: { x: tlb.x + tlb.width / 2, y: tlb.y + tlb.height / 2 },
-                                br: { x: brb.x + brb.width / 2, y: brb.y + brb.height / 2 }
-                            };
-                        }""")
-
-                        if boxes and boxes.get('isContracted'):
-                            img_box = boxes['img']
-                            # Fast drag top-left handle outward to full photo edge (0%, 0%)
-                            page.mouse.move(boxes['tl']['x'], boxes['tl']['y'])
-                            page.mouse.down()
-                            page.mouse.move(img_box['x'] - 15, img_box['y'] - 15, steps=2)
-                            page.mouse.up()
-                            time.sleep(0.1)
-
-                            # Fast drag bottom-right handle outward to full photo edge (100%, 100%)
-                            br_pos = page.evaluate("""() => {
-                                const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
-                                if (!br) return null;
-                                const b = br.getBoundingClientRect();
-                                return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
-                            }""")
-                            if br_pos:
-                                page.mouse.move(br_pos['x'], br_pos['y'])
-                                page.mouse.down()
-                                page.mouse.move(img_box['x'] + img_box['width'] + 15, img_box['y'] + img_box['height'] + 15, steps=2)
-                                page.mouse.up()
-                                time.sleep(0.8)
-                    except Exception:
-                        pass
-
-                    page.evaluate("window.scrollTo(0, 1500)")
-                    time.sleep(0.2)
-
-                    html = page.content()
                     raw_info["final_url"] = page.url
+                    html = page.content()
+
+                    # 3. Parse Google Lens Visual Matches
+                    import html as html_lib
+                    from urllib.parse import urlparse
+
+                    def clean_str(s: str) -> str:
+                        s = s.replace(r"\u003d", "=").replace(r"\u0026", "&").replace(r"\/", "/")
+                        s = s.replace(r"\u003c", "<").replace(r"\u003e", ">")
+                        return s
+
+                    unescaped_html = html_lib.unescape(html)
+                    seen: set[str] = set()
+
+                    # Fast-path: Check embedded initial SSR JSON script tags rendered at domcontentloaded
+                    pattern_ssr = re.compile(
+                        r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*null,\s*\d+,\s*\{[^}]*"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"',
+                        re.DOTALL
+                    )
+                    for m in pattern_ssr.finditer(unescaped_html):
+                        orig_img = clean_str(m.group(1))
+                        source_url = clean_str(m.group(4))
+                        title = clean_str(m.group(5))
+                        domain = urlparse(source_url).netloc
+                        if source_url not in seen:
+                            seen.add(source_url)
+                            candidates.append(Candidate(
+                                image_url=orig_img,
+                                source_url=source_url,
+                                title=title,
+                                domain=domain,
+                            ))
+
+                    # If SSR returned zero candidates, probe for contracted crop handles & dynamic cards
+                    if not candidates:
+                        try:
+                            page.wait_for_selector("div.pklMG, [aria-label*='corner']", timeout=600)
+                        except Exception:
+                            pass
+
+                        try:
+                            boxes = page.evaluate("""() => {
+                                const img = document.querySelector('img.fHp7ze') || document.querySelector('div.UNBEIe img') || document.querySelector('img[src^="data:image"]') || document.querySelector('img');
+                                const tl = document.querySelector('div.pklMG.h1wbAd') || document.querySelector('[aria-label*="Top-left corner"]');
+                                const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
+                                if (!img || !tl || !br) return null;
+
+                                const tlAria = tl.getAttribute('aria-label') || '';
+                                const brAria = br.getAttribute('aria-label') || '';
+                                const isContracted = (!tlAria.includes('left 0%') || !tlAria.includes('top 0%') ||
+                                                      !brAria.includes('right 100%') || !brAria.includes('bottom 100%'));
+
+                                const ib = img.getBoundingClientRect();
+                                const tlb = tl.getBoundingClientRect();
+                                const brb = br.getBoundingClientRect();
+                                return {
+                                    isContracted: isContracted,
+                                    img: { x: ib.x, y: ib.y, width: ib.width, height: ib.height },
+                                    tl: { x: tlb.x + tlb.width / 2, y: tlb.y + tlb.height / 2 },
+                                    br: { x: brb.x + brb.width / 2, y: brb.y + brb.height / 2 }
+                                };
+                            }""")
+
+                            if boxes and boxes.get('isContracted'):
+                                img_box = boxes['img']
+                                page.mouse.move(boxes['tl']['x'], boxes['tl']['y'])
+                                page.mouse.down()
+                                page.mouse.move(img_box['x'] - 15, img_box['y'] - 15, steps=2)
+                                page.mouse.up()
+
+                                br_pos = page.evaluate("""() => {
+                                    const br = document.querySelector('div.pklMG.nEBuLc') || document.querySelector('[aria-label*="Bottom-right corner"]');
+                                    if (!br) return null;
+                                    const b = br.getBoundingClientRect();
+                                    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+                                }""")
+                                if br_pos:
+                                    page.mouse.move(br_pos['x'], br_pos['y'])
+                                    page.mouse.down()
+                                    page.mouse.move(img_box['x'] + img_box['width'] + 15, img_box['y'] + img_box['height'] + 15, steps=2)
+                                    page.mouse.up()
+                                    time.sleep(0.5)
+                        except Exception:
+                            pass
+
+                        page.evaluate("window.scrollTo(0, 1500)")
+                        html = page.content()
+                        unescaped_html = html_lib.unescape(html)
+
+                        pattern_data_im = re.compile(
+                            r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*\{"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"'
+                        )
+                        for m in pattern_data_im.finditer(unescaped_html):
+                            orig_img = clean_str(m.group(1))
+                            source_url = clean_str(m.group(4))
+                            title = clean_str(m.group(5))
+                            domain = urlparse(source_url).netloc
+                            if source_url not in seen:
+                                seen.add(source_url)
+                                candidates.append(Candidate(
+                                    image_url=orig_img,
+                                    source_url=source_url,
+                                    title=title,
+                                    domain=domain,
+                                ))
+
                     context.close()
-
-                # 3. Parse Google Lens Visual Matches from data-im and embedded JSON
-                import html as html_lib
-                unescaped_html = html_lib.unescape(html)
-
-                def clean_str(s: str) -> str:
-                    s = s.replace(r"\u003d", "=").replace(r"\u0026", "&").replace(r"\/", "/")
-                    s = s.replace(r"\u003c", "<").replace(r"\u003e", ">")
-                    return s
-
-                seen: set[str] = set()
-                from urllib.parse import urlparse
-
-                # Pattern A: Dynamic cards in data-im (populated after readjustment)
-                pattern_data_im = re.compile(
-                    r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*\{"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"'
-                )
-                for m in pattern_data_im.finditer(unescaped_html):
-                    orig_img = clean_str(m.group(1))
-                    source_url = clean_str(m.group(4))
-                    title = clean_str(m.group(5))
-                    domain = urlparse(source_url).netloc
-                    if source_url not in seen:
-                        seen.add(source_url)
-                        candidates.append(Candidate(
-                            image_url=orig_img,
-                            source_url=source_url,
-                            title=title,
-                            domain=domain,
-                        ))
-
-                # Pattern B: Embedded initial SSR JSON script tags
-                pattern_ssr = re.compile(
-                    r'\["(https:[^"]+)",\s*(\d+),\s*(\d+)\],\s*null,\s*\d+,\s*\{[^}]*"2003":\s*\[[^,]*,\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"',
-                    re.DOTALL
-                )
-                for m in pattern_ssr.finditer(unescaped_html):
-                    orig_img = clean_str(m.group(1))
-                    source_url = clean_str(m.group(4))
-                    title = clean_str(m.group(5))
-                    domain = urlparse(source_url).netloc
-                    if source_url not in seen:
-                        seen.add(source_url)
-                        candidates.append(Candidate(
-                            image_url=orig_img,
-                            source_url=source_url,
-                            title=title,
-                            domain=domain,
-                        ))
 
             except Exception as e:
                 raw_info["browser_error"] = str(e)
+            finally:
+                if temp_dir_obj is not None:
+                    try:
+                        temp_dir_obj.cleanup()
+                    except Exception:
+                        pass
 
         # 4. Fallback to DirectYandexProvider if Google Lens returned no candidates
         if not candidates and self.fallback_on_captcha:

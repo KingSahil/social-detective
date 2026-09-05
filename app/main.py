@@ -113,11 +113,22 @@ def run_pipeline(
     def _mark(name: str) -> None:
         _phase_marks.append((name, _time.perf_counter() - _t0))
 
-    # Pre-launch web search concurrently with Face Detection to maximize pipeline parallelism
+    # Pre-launch web search and blockchain client concurrently with Face Detection
     from concurrent.futures import ThreadPoolExecutor
-    search_executor = ThreadPoolExecutor(max_workers=1)
+    bg_executor = ThreadPoolExecutor(max_workers=2)
     search_future = None
     prelaunched_search_provider = None
+
+    def _prewarm_blockchain():
+        try:
+            from app.config import require_blockchain_config
+            from app.blockchain import BlockchainClient
+            rpc, pk, ca = require_blockchain_config()
+            return BlockchainClient(rpc, pk, ca)
+        except Exception:
+            return None
+
+    blockchain_future = bg_executor.submit(_prewarm_blockchain)
 
     if not target and not handle:
         from app.config import require_search_config, LENS_HEADLESS
@@ -151,7 +162,7 @@ def run_pipeline(
             else:
                 prelaunched_search_provider = FreeMultiEngineSearchProvider(headless=headless)
 
-        search_future = search_executor.submit(prelaunched_search_provider.search, str(image_path_obj))
+        search_future = bg_executor.submit(prelaunched_search_provider.search, str(image_path_obj))
 
     # ==================================================================
     # [1/7] FACE DETECTION
@@ -749,8 +760,15 @@ def run_pipeline(
     from app.blockchain import BlockchainClient
 
     try:
-        rpc, pk, ca = require_blockchain_config()
-        bc = BlockchainClient(rpc, pk, ca)
+        bc = None
+        if blockchain_future is not None:
+            try:
+                bc = blockchain_future.result()
+            except Exception:
+                bc = None
+        if bc is None:
+            rpc, pk, ca = require_blockchain_config()
+            bc = BlockchainClient(rpc, pk, ca)
     except SystemExit:
         raise
     except Exception as e:
@@ -792,7 +810,10 @@ def run_pipeline(
     _step(7, total_steps, "VERIFICATION")
 
     if tx.status == "confirmed":
-        verify_result = bc.verify_hash(content_hash)
+        if getattr(tx, "existing_verify", None) and tx.existing_verify.exists:
+            verify_result = tx.existing_verify
+        else:
+            verify_result = bc.verify_hash(content_hash)
 
         _info(f"Local hash:")
         _info(f"{content_hash}")

@@ -27,6 +27,7 @@ class TxResult:
     contract_address: str = ""
     network: str = ""
     error: str = ""
+    existing_verify: Optional[VerifyResult] = None
 
 
 @dataclass
@@ -164,6 +165,7 @@ class BlockchainClient:
                     status="confirmed",
                     contract_address=self._contract_address,
                     network=self._network,
+                    existing_verify=existing,
                 )
         except Exception:
             pass

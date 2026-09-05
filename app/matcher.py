@@ -43,13 +43,13 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 class FaceMatcher:
     """Download candidate images, extract face embeddings, rank by similarity."""
 
-    def __init__(self, face_processor: FaceProcessor, timeout: int = 15):
+    def __init__(self, face_processor: FaceProcessor, timeout: float = 3.5):
         self._fp = face_processor
         self._timeout = timeout
         # Shared keep-alive session: candidate images often come from the same
         # CDN hosts; reusing connections avoids a fresh TCP+TLS handshake each.
         self._http = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=35, pool_maxsize=35)
         self._http.mount("https://", adapter)
         self._http.mount("http://", adapter)
         self._http.headers.update({
@@ -72,7 +72,7 @@ class FaceMatcher:
         Candidates sharing the same image URL are downloaded and embedded
         once; the result is fanned out to every duplicate.
         """
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # Deduplicate by image URL (empty URLs get a unique key)
         unique: dict[str, Candidate] = {}
@@ -88,11 +88,16 @@ class FaceMatcher:
 
         results_by_key: dict[str, MatchResult] = {}
         items = list(unique.items())
-        max_workers = min(20, max(1, len(items)))
+        max_workers = min(32, max(1, len(items)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for k, result in executor.map(_worker, items):
-                if result is not None:
-                    results_by_key[k] = result
+            future_to_key = {executor.submit(_worker, item): item[0] for item in items}
+            for fut in as_completed(future_to_key):
+                try:
+                    k, result = fut.result()
+                    if result is not None:
+                        results_by_key[k] = result
+                except Exception:
+                    pass
 
         # Fan unique results back out to every candidate (duplicates share
         # the MatchResult outcome but keep their own candidate object).
@@ -161,6 +166,14 @@ class FaceMatcher:
                     face_detected=False,
                     error="Failed to download image",
                 )
+
+            # Fast downscale large candidate images (e.g. 2000px, 4K) to max 640px.
+            # Preserves ArcFace facial feature fidelity while matching native 640x640 detector.
+            h, w = img.shape[:2]
+            max_dim = max(h, w)
+            if max_dim > 640:
+                scale = 640.0 / max_dim
+                img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
             # Multi-face inspection: inspect ALL detected faces in the candidate image
             # (e.g. event cards, builder badges, group photos)
