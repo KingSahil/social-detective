@@ -22,7 +22,7 @@
   </p>
   <p align="center">
     <a href="https://en.wikipedia.org/wiki/SHA-2"><img src="https://img.shields.io/badge/Fingerprint-SHA--256-555555" alt="SHA-256" /></a>
-    <a href="https://pytest.org"><img src="https://img.shields.io/badge/Test%20Suite-60%20Passed-2ea44f?logo=pytest&logoColor=white" alt="Pytest Suite" /></a>
+    <a href="https://pytest.org"><img src="https://img.shields.io/badge/Test%20Suite-107%20Passed-2ea44f?logo=pytest&logoColor=white" alt="Pytest Suite" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   </p>
 </p>
@@ -348,7 +348,56 @@ flowchart TD
 * **Search Engine Redirect Unwrapping**: Resolves search wrapper redirects (`google.com/goto`, `google.com/url`) so reel shortcodes and video anchors are never lost.
 * **Silent Resilient DuckDuckGo Fallback**: Employs low-level C file descriptor redirection (`os.dup2`) and concurrency locks to eliminate Rust `rustls`/`h2` TLS disconnect warnings when querying DuckDuckGo.
 
-### 5. Multimodal Scene & GEOINT Estimation
+### 5. Multi-Platform Handle Profiling (`--handle`)
+* Execute targeted sweeps across a suspected identity without manual URL scraping:
+  * `--handle USER --platform instagram`: Sweeps public Instagram posts and reels.
+  * `--handle USER --platform twitter`: Extracts media tweets from the user's timeline.
+  * `--handle USER`: Concurrently sweeps **all three** platforms (X/Twitter, Instagram, LinkedIn), merging all discovered media into the comparison pool.
+
+#### LinkedIn leg (`--handle` + LinkedIn)
+LinkedIn profiles do not use handles (they use name slugs like `gourish-julka-472a1632b`), so the `--handle` keyword is treated as a **name** for LinkedIn:
+* `GourishJulka` is split into `Gourish Julka` (camelCase aware) and run through `site:linkedin.com/in` and `site:linkedin.com/posts` dorks (SerpAPI primary when a key is configured, free DuckDuckGo fallback).
+* Discovered **public post pages** are rendered and every embedded photo (post images + member profile photos) enters the biometric pool.
+* Opt out of the LinkedIn leg with `--platform instagram` or `--platform twitter`; force only it with `--platform linkedin`.
+* Profile pages themselves are never accessed (authwall; see section 7).
+
+### 6. Identity Pivots: Cross-Platform Username Sweep (WhatsMyName)
+When visual reverse search yields no strong biometric match, FaceTrace pivots on **identity** instead of the face: it takes every candidate handle (recalled from subject memory, extracted from search-result titles/URLs, or passed via `--handle`) and checks it across hundreds of platforms using the community-maintained [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset (716 sites, vendored at `data/wmn/`). Discovered public profile images (avatars, profile `og:image`) are validated and fed into the same biometric matching pool as visual search results.
+
+* **Strict evidence logic**: an account counts as found only on `e_code` + `e_string` dual evidence; soft-404s and login redirects are treated as misses.
+* **Tiered site selection**: by default only media-relevant categories (social, coding, tech, images, art, blog, music, video, gaming) without bot protection are checked, capped at 300 sites per handle. Set `PIVOT_EXHAUSTIVE=true` for the full list.
+* **Bounded runtime**: per-check timeout, global sweep budget, connection pooling, per-site error isolation; a single slow or failing site never aborts the sweep.
+* **False-positive guards**: handles are normalized and length-checked, generic names (admin, john, test, ...) are skipped, account hits per handle are capped, and the total candidates fed to the matcher are capped.
+
+#### Identity Pivot Configuration (env vars, defaults shown)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PIVOT_ENABLED` | `true` | Master switch for the username-sweep pivot |
+| `PIVOT_ENGINE` | `wmn` | Sweep engine (native WhatsMyName) |
+| `PIVOT_MAX_SITES` | `300` | Max sites checked per handle |
+| `PIVOT_TIMEOUT` | `8.0` | Per-site check timeout (seconds) |
+| `PIVOT_SWEEP_TIMEOUT` | `30.0` | Global sweep budget (seconds) |
+| `PIVOT_MAX_WORKERS` | `12` | Concurrent site checks |
+| `PIVOT_MAX_ACCOUNTS` | `25` | Max account hits per handle |
+| `PIVOT_MAX_CANDIDATES` | `50` | Max harvested images fed to the matcher |
+| `PIVOT_EXHAUSTIVE` | `false` | Check all non-NSFW sites instead of the Tier 1 subset |
+| `PIVOT_BROWSER_FALLBACK` | `false` | Allow Playwright chromium escalation for bot-walled sites |
+
+**Attribution**: the vendored dataset is CC BY-SA 4.0, (c) 2015-2026 Micah Hoffman and WhatsMyName contributors; see [`data/wmn/ATTRIBUTION.md`](data/wmn/ATTRIBUTION.md). Public data only: the sweep never accesses private or authenticated content.
+
+### 7. LinkedIn Public Post Harvesting
+LinkedIn is invisible to exact-username sweeps (profiles use name-derived slugs like `gourish-julka-472a1632b`, not handles) and to reverse image engines (post photos are not indexed). But **public post pages** (`linkedin.com/posts/...`) are guest-accessible and expose:
+* the post's embedded images (feedshare photos) via `og:image` and the page DOM,
+* member profile photos (displayphoto URLs) present on the page,
+* associate profile slugs (`/in/kingsahil`, `/in/khannasparsh`, ...) for cross-platform identity pivots.
+
+FaceTrace harvests all of this in `--target` mode (`TargetURLProvider` detects `linkedin.com/posts/` URLs, plain requests with browser escalation as fallback), and the associate-forensics stage renders discovered post URLs to pull every embedded photo into the biometric pool.
+
+> [!IMPORTANT]
+> **Profile pages are intentionally out of scope.** `linkedin.com/in/...` serves HTTP 999 to scripts and redirects browsers to the authwall. The pipeline never authenticates, bypasses the login wall, or accesses private content: only guest-visible post pages are used.
+
+### 8. Multimodal Scene & GEOINT Estimation
 * **Environmental Scene Analysis (`app/geo.py`)**: Analyzes background textures, outdoor lighting, architectural structures, and landmark features to aid in physical geolocation hypothesis generation.
 
 ---
@@ -772,6 +821,9 @@ social-detective/
 │   ├── blockchain.py        # Web3.py client for Solidity contract interaction
 │   ├── verify.py            # Standalone integrity and blockchain verification logic
 │   ├── geo.py               # Multimodal GEOINT and environmental scene analysis
+│   ├── harvest.py           # Account imagery harvesting & avatar extraction
+│   ├── identity.py          # WhatsMyName cross-platform username sweep engine
+│   ├── linkedin.py          # Public LinkedIn post harvesting & associate extraction
 │   └── memory/              # Decentralized Web3 Memory & Knowledge Graph
 │       ├── __init__.py      # Memory module initialization
 │       ├── ipfs.py          # Deterministic CIDv1 calculation & public IPFS resolution
@@ -786,6 +838,7 @@ social-detective/
 ├── data/
 │   ├── input/               # Query face portrait images (e.g., test_face_11.jpg)
 │   ├── results/             # Forensic JSON dossiers and embeddings cache
+│   ├── wmn/                 # WhatsMyName dataset (716 sites) & attribution
 │   └── memory/              # Local decentralized knowledge graph and IPFS cache
 │       ├── knowledge_graph.json # Synced entity graph & biometric vectors
 │       └── ipfs_cache/      # Cached decentralized payloads
@@ -795,6 +848,9 @@ social-detective/
 │   ├── test_matching.py     # Unit tests for cosine similarity and ranking
 │   ├── test_hashing.py      # Unit tests for canonicalization and hashing
 │   ├── test_blockchain.py   # Unit tests for ABI loading and smart contract helpers
+│   ├── test_harvest.py      # Unit tests for avatar & OG image harvesting
+│   ├── test_identity.py     # Unit tests for WhatsMyName username sweeps
+│   ├── test_linkedin.py     # Unit tests for LinkedIn post parsing
 │   ├── test_memory_web3.py  # Unit tests for IPFS CIDv1 and Web3 memory syncer
 │   └── test_ocr.py          # Unit tests for text and visual extraction helpers
 ├── requirements.txt         # Production dependencies
@@ -813,24 +869,27 @@ FaceTrace includes a comprehensive unit test suite covering all modules without 
 pytest
 ```
 
-**Test Execution Results (60 Tests Passing):**
+**Test Execution Results (107 Tests Passing):**
 ```
 ============================= test session starts ==============================
 platform win32 -- Python 3.14.x, pytest-9.x.x, pluggy-1.x.x
 rootdir: C:\Projects\social-detective
 configfile: pyproject.toml
 testpaths: tests
-collected 60 items
+collected 107 items
 
-tests\test_blockchain.py ....                                            [  6%]
-tests\test_face.py ....                                                  [ 13%]
-tests\test_hashing.py .............                                      [ 35%]
-tests\test_matching.py ........                                          [ 48%]
-tests\test_memory_web3.py ....                                           [ 55%]
-tests\test_ocr.py ..                                                     [ 58%]
+tests\test_blockchain.py ....                                            [  3%]
+tests\test_face.py ....                                                  [  7%]
+tests\test_harvest.py ..............                                     [ 20%]
+tests\test_hashing.py .............                                      [ 32%]
+tests\test_identity.py .................                                 [ 48%]
+tests\test_linkedin.py ................                                  [ 63%]
+tests\test_matching.py ........                                          [ 71%]
+tests\test_memory_web3.py ....                                           [ 74%]
+tests\test_ocr.py ..                                                     [ 76%]
 tests\test_search.py .........................                           [100%]
 
-============================= 60 passed in ~35s ================================
+============================ 107 passed in ~42s ================================
 ```
 
 ### Verifying GPU Acceleration

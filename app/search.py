@@ -1060,6 +1060,25 @@ class TargetURLProvider(SearchProvider):
         candidates: list[Candidate] = []
         page_title = ""
 
+        # Special handling: LinkedIn public posts (guest-accessible HTML with
+        # media.licdn.com images + associate profile slugs)
+        if "linkedin.com" in domain and "/posts/" in self.target_url:
+            try:
+                from app.linkedin import harvest_linkedin_post, is_linkedin_post_url
+                if is_linkedin_post_url(self.target_url):
+                    candidates = harvest_linkedin_post(
+                        self.target_url, timeout=self._timeout, max_photos=4
+                    )
+                    if candidates:
+                        return SearchResult(
+                            candidates=candidates,
+                            provider="LinkedIn Public Post",
+                            searched_at=timestamp,
+                            raw_response={"target_url": self.target_url, "image_count": len(candidates)},
+                        )
+            except Exception:
+                pass  # Fall through to generic HTML scraper
+
         # Special handling: Instagram post via Instaloader
         if "instagram.com" in domain and ("/p/" in self.target_url or "/reel/" in self.target_url):
             try:
@@ -2319,6 +2338,89 @@ def extract_associate_network_leads(
     # Collaborators take top priority
     ordered_names = sorted(collaborators) + [n for n in sorted(other_names) if n not in collaborators]
     return ordered_names, sorted(contexts)
+
+
+# ---------------------------------------------------------------------------
+# Username Sweep Provider (WhatsMyName + Public Content Harvester)
+# ---------------------------------------------------------------------------
+
+class UsernameSweepProvider(SearchProvider):
+    """
+    Search provider that executes cross-platform username sweeps via the vendored
+    WhatsMyName dataset and harvests public profile imagery (avatars/og:images)
+    into candidate biometric records.
+    """
+    PROVIDER_NAME = "Username Sweep (WhatsMyName)"
+
+    def __init__(
+        self,
+        handles: list[str] | None = None,
+        timeout: float | None = None,
+        max_candidates: int | None = None,
+    ):
+        self.handles = [h for h in (handles or []) if h]
+        self.timeout = timeout
+        self.max_candidates = max_candidates
+
+    def search(self, image_path: str | Path | None = None) -> SearchResult:
+        """
+        Executes sweep across all configured handles and harvests profile images.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if not self.handles:
+            return SearchResult(
+                candidates=[],
+                provider=self.PROVIDER_NAME,
+                searched_at=timestamp,
+                raw_response={"handles": [], "hits_count": 0},
+            )
+
+        from app.config import (
+            PIVOT_ENABLED,
+            PIVOT_TIMEOUT,
+            PIVOT_MAX_CANDIDATES,
+            PIVOT_BROWSER_FALLBACK,
+        )
+
+        if not PIVOT_ENABLED:
+            return SearchResult(
+                candidates=[],
+                provider=self.PROVIDER_NAME,
+                searched_at=timestamp,
+                raw_response={"disabled": True},
+            )
+
+        from app.identity import UsernameSweepEngine, AccountHit
+        from app.harvest import PublicContentHarvester
+
+        sweep_timeout = self.timeout or PIVOT_TIMEOUT
+        max_cands = self.max_candidates or PIVOT_MAX_CANDIDATES
+
+        engine = UsernameSweepEngine(timeout=sweep_timeout)
+        harvester = PublicContentHarvester(
+            timeout=sweep_timeout,
+            max_candidates=max_cands,
+            browser_fallback=PIVOT_BROWSER_FALLBACK,
+        )
+
+        all_hits: list[AccountHit] = []
+        for handle in self.handles:
+            hits = engine.sweep(handle)
+            all_hits.extend(hits)
+
+        candidates = harvester.harvest(all_hits)
+        filtered = filter_and_prioritize_candidates(candidates)
+
+        return SearchResult(
+            candidates=filtered[:max_cands],
+            provider=self.PROVIDER_NAME,
+            searched_at=timestamp,
+            raw_response={
+                "handles": self.handles,
+                "hits_count": len(all_hits),
+                "candidates_count": len(filtered),
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
