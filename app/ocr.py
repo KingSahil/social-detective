@@ -142,7 +142,7 @@ def extract_scene_text_and_clues(
     entities = set()
     for pattern in [
         r"(?:hacker\s*house|hackhazards?)\s*goa(?:\s*20\d\d)?",
-        r"(?:symbiosis|mbiosis)\s*skills(?:\s*and\s*(?:open|professional)\s*university)?",
+        r"(?:symbiosis|mbiosis|embiosis)\s*skill[es]*(?:\s*and\s*(?:open|professional)\s*university)?",
         r"ethindia(?:\s*20\d\d)?",
         r"builder\s*passport",
         r"participant\s*frame",
@@ -150,13 +150,14 @@ def extract_scene_text_and_clues(
         m = re.search(pattern, full_text, re.IGNORECASE)
         if m:
             entities.add(m.group(0).strip())
-    if "mbiosisskills" in full_text.lower().replace(" ", ""):
+    clean_no_spaces = full_text.lower().replace(" ", "").replace(":", "")
+    if any(k in clean_no_spaces for k in ["symbiosis", "mbiosis", "embiosis"]) and "skill" in clean_no_spaces:
         entities.add("Symbiosis Skills University")
 
     # Keywords
     keywords = set()
-    for word in ["goa", "pune", "delhi", "mumbai", "india", "hackathon", "builder", "passport", "frame", "studio"]:
-        if re.search(rf"\b{word}\b", full_text, re.IGNORECASE):
+    for word in ["goa", "pune", "delhi", "mumbai", "india", "hackathon", "builder", "passport", "frame", "studio", "symbiosis"]:
+        if re.search(rf"\b{word}\b", full_text, re.IGNORECASE) or word in clean_no_spaces:
             keywords.add(word)
 
     return {

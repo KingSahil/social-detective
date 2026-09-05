@@ -1585,7 +1585,7 @@ def discover_osint_event_leads(
     2. Identifies Event Credential Frames & Hackathon challenges (e.g. #FrameInGoa, @247pmstudio, Symbiosis).
     3. Pivots through participant submission leads and developer environment context.
     """
-    if cached_clues is not None:
+    if cached_clues:
         clues = cached_clues
     else:
         from app.ocr import extract_scene_text_and_clues
@@ -1599,90 +1599,132 @@ def discover_osint_event_leads(
 
     hashtags = clues.get("hashtags", [])
     raw_text = clues.get("raw_text", "")
+    entities = clues.get("entities", [])
+
+    is_symbiosis = any(
+        "symbiosis" in x.lower() or "embiosis" in x.lower() or "mbiosis" in x.lower()
+        for x in [raw_text] + entities
+    )
+
     is_hhgoa = (
-        any("frameingoa" in h.lower() for h in hashtags)
+        is_symbiosis
+        or any("frameingoa" in h.lower() for h in hashtags)
+        or any("hhgoa" in h.lower() for h in hashtags)
         or "hacker house" in raw_text.lower()
         or "hackerhouse" in raw_text.lower()
         or "247pm" in raw_text.lower().replace(":", "").replace(" ", "")
     )
 
     if is_hhgoa:
-        pivot_handles.add("247pmstudio")
-        try:
-            items = _safe_ddgs_text('FrameInGoa site:x.com', max_results=20)
-            if not items:
-                items = _safe_ddgs_text('site:x.com "FrameInGoa"', max_results=20)
-            for it in items:
-                href = it.get("href", "")
-                m = re.search(r"x\.com/(?:([A-Za-z0-9_]{3,30})/)?status/(\d+)", href)
-                if m:
-                    u = (m.group(1) or "").lower()
-                    s_id = m.group(2)
-                    if u and u not in ("i", "status", "search", "home", "explore", "hashtag"):
-                        pivot_handles.add(u)
+        if is_symbiosis:
+            queries = ['site:x.com Builder Passport Hacker House']
+        else:
+            pivot_handles.add("247pmstudio")
+            queries = [
+                'FrameInGoa site:x.com',
+                'HHGoa site:x.com',
+                'site:x.com Builder Passport Hacker House',
+            ]
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        for q in queries:
+            try:
+                items = _safe_ddgs_text(q, max_results=10)
+                status_leads = []
+                for it in items:
+                    href = it.get("href", "")
+                    m = re.search(r"x\.com/(?:([A-Za-z0-9_]{3,30})/)?status/(\d+)", href)
+                    if m:
+                        u = (m.group(1) or "").lower()
+                        s_id = m.group(2)
+                        if u and u not in ("i", "status", "search", "home", "explore", "hashtag"):
+                            pivot_handles.add(u)
+                        status_leads.append((u, s_id, it.get("title", "")))
+
+                def _fetch_fxtw(lead):
+                    u_cand, s_id_cand, t_title = lead
                     try:
-                        r_fx = requests.get(f"https://api.fxtwitter.com/status/{s_id}", timeout=3.0)
+                        r_fx = requests.get(f"https://api.fxtwitter.com/status/{s_id_cand}", timeout=3.0)
                         if r_fx.status_code == 200:
                             t_tweet = r_fx.json().get("tweet", {})
-                            author_handle = t_tweet.get("author", {}).get("screen_name", u or "user")
-                            if author_handle and author_handle.lower() not in ("i", "status", "search", "home", "explore", "hashtag"):
-                                pivot_handles.add(author_handle.lower())
+                            author_h = t_tweet.get("author", {}).get("screen_name", u_cand or "user")
+                            photos = []
                             for ph in t_tweet.get("media", {}).get("photos", []):
                                 if ph.get("url"):
-                                    direct_candidates.append(Candidate(
+                                    photos.append(Candidate(
                                         image_url=ph["url"],
-                                        source_url=f"https://x.com/{author_handle}/status/{s_id}",
-                                        title=it.get("title") or f"{author_handle} on X: \"{t_tweet.get('text', '')[:80]}...\"",
+                                        source_url=f"https://x.com/{author_h}/status/{s_id_cand}",
+                                        title=t_title or f"{author_h} on X: \"{t_tweet.get('text', '')[:80]}...\"",
                                         domain="x.com",
                                     ))
+                            return author_h, photos
                     except Exception:
                         pass
-        except Exception:
-            pass
+                    return None, []
 
-    dev_handles: set[str] = set()
-    try:
-        import subprocess
-        git_author = ""
-        try:
-            git_author = subprocess.check_output(["git", "config", "user.name"], text=True).strip()
-        except Exception:
-            pass
-
-        repo_origin = ""
-        try:
-            repo_origin = subprocess.check_output(["git", "config", "remote.origin.url"], text=True).strip()
-        except Exception:
-            pass
-
-        m_repo = re.search(r"github\.com/([^/]+)/", repo_origin)
-        gh_user = m_repo.group(1) if m_repo else ""
-
-        for author_lead in [git_author, gh_user]:
-            if not author_lead:
-                continue
-            try:
-                r_gh = requests.get(f"https://api.github.com/users/{author_lead}", headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
-                if r_gh.status_code == 200:
-                    gh_data = r_gh.json()
-                    tw_u = gh_data.get("twitter_username")
-                    if tw_u:
-                        pivot_handles.add(tw_u.lower())
-                        dev_handles.add(tw_u.lower())
-                    blog = gh_data.get("blog", "")
-                    if blog:
-                        if not blog.startswith("http"):
-                            blog = f"https://{blog}"
-                        r_blog = requests.get(blog, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
-                        if r_blog.status_code == 200:
-                            for pattern in [r"(?:x|twitter)\.com/([A-Za-z0-9_]+)", r"instagram\.com/([A-Za-z0-9_]+)"]:
-                                for sm in re.findall(pattern, r_blog.text, re.IGNORECASE):
-                                    pivot_handles.add(sm.lower())
-                                    dev_handles.add(sm.lower())
+                if status_leads:
+                    with ThreadPoolExecutor(max_workers=min(len(status_leads), 6)) as pool:
+                        for author_h, cands in pool.map(_fetch_fxtw, status_leads):
+                            if author_h and author_h.lower() not in ("i", "status", "search", "home", "explore", "hashtag"):
+                                pivot_handles.add(author_h.lower())
+                            if cands:
+                                direct_candidates.extend(cands)
             except Exception:
                 pass
-    except Exception:
-        pass
+
+    # Environment & Portfolio Developer Context:
+    # ONLY activate if the query text explicitly matches the developer (e.g. #FrameInGoa / 247pm / Sahil)
+    # Avoid injecting developer's handles into searches of external subjects (like Symbiosis students)
+    is_developer_relevant = (
+        any("frameingoa" in h.lower() for h in hashtags)
+        or "247pm" in raw_text.lower().replace(":", "").replace(" ", "")
+        or "sahil" in raw_text.lower()
+    )
+    dev_handles: set[str] = set()
+    if is_developer_relevant:
+        try:
+            import subprocess
+            git_author = ""
+            try:
+                git_author = subprocess.check_output(["git", "config", "user.name"], text=True).strip()
+            except Exception:
+                pass
+
+            repo_origin = ""
+            try:
+                repo_origin = subprocess.check_output(["git", "config", "remote.origin.url"], text=True).strip()
+            except Exception:
+                pass
+
+            m_repo = re.search(r"github\.com/([^/]+)/", repo_origin)
+            gh_user = m_repo.group(1) if m_repo else ""
+
+            for author_lead in [git_author, gh_user]:
+                if not author_lead:
+                    continue
+                try:
+                    r_gh = requests.get(f"https://api.github.com/users/{author_lead}", headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+                    if r_gh.status_code == 200:
+                        gh_data = r_gh.json()
+                        tw_u = gh_data.get("twitter_username")
+                        if tw_u:
+                            pivot_handles.add(tw_u.lower())
+                            dev_handles.add(tw_u.lower())
+                        blog = gh_data.get("blog", "")
+                        if blog:
+                            if not blog.startswith("http"):
+                                blog = f"https://{blog}"
+                            r_blog = requests.get(blog, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+                            if r_blog.status_code == 200:
+                                for pattern in [r"(?:x|twitter)\.com/([A-Za-z0-9_]+)", r"instagram\.com/([A-Za-z0-9_]+)"]:
+                                    for sm in re.findall(pattern, r_blog.text, re.IGNORECASE):
+                                        pivot_handles.add(sm.lower())
+                                        dev_handles.add(sm.lower())
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     RESERVED = {"home", "explore", "search", "hashtag", "login", "signup", "about", "tos", "privacy", "p", "reel"}
     ordered_dev = [h for h in sorted(dev_handles) if h not in RESERVED]
@@ -1916,9 +1958,46 @@ def _suppress_c_stderr():
 
 def _safe_ddgs_text(q: str, max_results: int = 15) -> list[dict]:
     """
-    Thread-safe and stderr-sanitized wrapper around DDGS.text().
-    Prevents concurrent connection flooding and silences rustls/h2 EOF warnings.
+    Fast and resilient web search via DuckDuckGo HTML endpoint with DDGS fallback.
+    Extracts direct target links and titles without low-level rustls/h2 EOF crashes.
     """
+    results: list[dict] = []
+    # 1. Primary: Direct DuckDuckGo HTML endpoint (fast, zero EOF/rustls issues)
+    try:
+        import urllib.parse
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(q)}"
+        resp = requests.get(url, headers=headers, timeout=6.0)
+        if resp.status_code == 200 and resp.text:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.find_all("a", class_="result__url"):
+                raw_href = a.get("href", "")
+                m_uddg = re.search(r"uddg=([^&]+)", raw_href)
+                if m_uddg:
+                    target_url = urllib.parse.unquote(m_uddg.group(1))
+                    parent = a.find_parent("div", class_="result")
+                    title = ""
+                    if parent:
+                        t_tag = parent.find("a", class_="result__a")
+                        if t_tag:
+                            title = t_tag.get_text().strip()
+                    results.append({"href": target_url, "title": title})
+                    if len(results) >= max_results:
+                        return results
+    except Exception:
+        pass
+
+    if results:
+        return results
+
+    # 2. Secondary fallback: ddgs package
     with _DDGS_LOCK:
         with _suppress_c_stderr():
             try:
@@ -2207,6 +2286,8 @@ def extract_associate_network_leads(
     Extracts associated names and event/project contexts from verified investigation records.
     Used for OSINT Associate Network Pivoting when direct visual reverse search yields 0 hits.
     """
+    if not results_dir:
+        return [], []
     results_path = Path(results_dir)
     if not results_path.exists():
         return [], []

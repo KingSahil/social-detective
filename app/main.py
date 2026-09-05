@@ -209,7 +209,7 @@ def run_pipeline(
     ocr_clues = {}
     try:
         if ocr_future:
-            ocr_clues = ocr_future.result(timeout=4.0)
+            ocr_clues = ocr_future.result(timeout=12.0)
     except Exception:
         pass
 
@@ -240,8 +240,9 @@ def run_pipeline(
                         return h, TwitterProfileProvider(h).search()
                     except Exception:
                         return h, None
-                with ThreadPoolExecutor(max_workers=min(len(ev_handles), 8)) as p:
-                    for h, res in p.map(_fetch, ev_handles):
+                fetch_handles = ev_handles[:6]
+                with ThreadPoolExecutor(max_workers=min(len(fetch_handles), 6)) as p:
+                    for h, res in p.map(_fetch, fetch_handles):
                         if res and res.candidates:
                             results.extend(res.candidates)
                             extracted_by_handle[h] = len(res.candidates)
@@ -454,7 +455,7 @@ def run_pipeline(
 
         # Automated Cross-Platform Social Pivoting (OSINT Discovery)
         # If visual reverse search yielded 0 candidates, immediately attempt social identity memory sweep
-        if candidate_count == 0:
+        if candidate_count == 0 and not no_memory:
             _info("Scanning cross-platform social identity memory...")
             recalled_handles = set(find_social_handles_from_subject_memory(query_embedding, fp=fp))
             all_pivot_handles = sorted(recalled_handles)
@@ -651,7 +652,10 @@ def run_pipeline(
     # If still no matches above threshold, activate Cross-Platform OSINT Social Pivot & Identity Memory
     if not matches and not target and not handle:
         _info("No candidates above threshold with visual search.")
-        _info("Activating cross-platform OSINT social pivot & identity memory...")
+        if no_memory:
+            _info("Activating cross-platform OSINT social pivot...")
+        else:
+            _info("Activating cross-platform OSINT social pivot & identity memory...")
         discovered_handles = set(extract_social_handles(search_result.candidates))
 
         recalled_handles: set[str] = set()
@@ -695,8 +699,10 @@ def run_pipeline(
                 def _fetch_ig():
                     try:
                         ig_prov = InstagramProfileProvider(api_key=api_key, allow_free=True)
-                        from app.search import extract_associate_network_leads
-                        _, contexts = extract_associate_network_leads()
+                        contexts = []
+                        if not no_memory:
+                            from app.search import extract_associate_network_leads
+                            _, contexts = extract_associate_network_leads()
                         return ig_prov.search_handles(all_pivot_handles, contexts=contexts)
                     except Exception:
                         return None
@@ -724,7 +730,7 @@ def run_pipeline(
                         _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
 
                     # Web OSINT leads for top seed handles if needed
-                    top_web_handles = [h for h in all_pivot_handles if h in ("supreme__sahil", "247pmstudio") or h in all_pivot_handles[:3]]
+                    top_web_handles = all_pivot_handles[:3]
                     futures_web = {pool.submit(_fetch_web, h): h for h in top_web_handles}
                     for fut in as_completed(futures_web):
                         h, web_res = fut.result()
@@ -740,7 +746,7 @@ def run_pipeline(
                         matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If still no matches above threshold and not targeted, activate Associate Forensics Graph
-    if not matches and not target and not handle:
+    if not matches and not target and not handle and not no_memory:
         _info("Visual reverse search yielded 0 direct hits.")
         _info("Activating Associate Forensics Graph (Network Pivoting)...")
         print()
