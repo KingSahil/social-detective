@@ -209,9 +209,14 @@ class BlockchainClient:
             # 2x base fee headroom + priority fee
             max_fee = int(base_fee * 2) + priority_fee
 
-            # Safe fixed gas limit for registerRecord(bytes32, string)
-            # avoids unnecessary estimate_gas RPC roundtrip (~400ms)
-            gas_limit = 150_000
+            # Dynamic gas limit with 25% safety buffer to accommodate rich IPFS CIDs & storage
+            try:
+                gas_est = self._contract.functions.registerRecord(
+                    hash_bytes, source_id
+                ).estimate_gas({"from": self._address})
+                gas_limit = int(gas_est * 1.25)
+            except Exception:
+                gas_limit = 350_000
 
             tx = self._contract.functions.registerRecord(
                 hash_bytes, source_id

@@ -274,11 +274,12 @@ def run_pipeline(
                                 extracted_by_handle[h] = len(res.candidates)
             return ev_handles, results, extracted_by_handle
 
-        early_event_future = bg_executor.submit(
-            _gather_early_event_candidates,
-            str(image_path_obj),
-            ocr_clues
-        )
+        if clue_tokens or context:
+            early_event_future = bg_executor.submit(
+                _gather_early_event_candidates,
+                str(image_path_obj),
+                ocr_clues
+            )
 
     # ==================================================================
     # [2/7] WEB SEARCH / TARGET MEDIA DISCOVERY

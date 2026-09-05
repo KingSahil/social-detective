@@ -86,18 +86,40 @@ class FaceMatcher:
             k, cand = item
             return k, self._process_candidate(query_embedding, cand)
 
+        def _domain_priority(item):
+            k, cand = item
+            dom = (cand.domain or "").lower()
+            src = (cand.source_url or "").lower()
+            # Primary social / professional profile sources prioritized first
+            if any(p in dom or p in src for p in ("linkedin.com", "x.com", "twitter.com", "github.com", "instagram.com")):
+                return 0
+            # High-reputation identity / media
+            if any(p in dom or p in src for p in ("web3", "facebook.com", "youtube.com", "medium.com")):
+                return 1
+            return 2
+
         results_by_key: dict[str, MatchResult] = {}
         items = list(unique.items())
-        max_workers = min(32, max(1, len(items)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_key = {executor.submit(_worker, item): item[0] for item in items}
-            for fut in as_completed(future_to_key):
-                try:
-                    k, result = fut.result()
-                    if result is not None:
-                        results_by_key[k] = result
-                except Exception:
-                    pass
+        items.sort(key=_domain_priority)
+
+        batch_size = 24
+        for i in range(0, len(items), batch_size):
+            batch = items[i : i + batch_size]
+            max_workers = min(24, max(1, len(batch)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_key = {executor.submit(_worker, item): item[0] for item in batch}
+                for fut in as_completed(future_to_key):
+                    try:
+                        k, result = fut.result()
+                        if result is not None:
+                            results_by_key[k] = result
+                    except Exception:
+                        pass
+
+            # Early exit: if we already found an unequivocal biometric match (similarity >= 85%),
+            # skip downloading and evaluating the remaining low-relevance scraper sites.
+            if any(r.similarity >= 0.85 for r in results_by_key.values()):
+                break
 
         # Fan unique results back out to every candidate (duplicates share
         # the MatchResult outcome but keep their own candidate object).
