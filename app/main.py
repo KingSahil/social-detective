@@ -87,9 +87,12 @@ def _fatal(msg: str) -> None:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+from app.config import DEFAULT_SIMILARITY_THRESHOLD
+
+
 def run_pipeline(
     image_path: str,
-    threshold: float = 0.70,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     platform: str | None = None,
     target: str | None = None,
     engine: str = "all",
@@ -739,8 +742,14 @@ def run_pipeline(
 
     # If no matches above threshold and we used open web search, try fallback to cropped face
     if not matches and not target and not handle:
-        cropped = fp.get_face_crop(image_path_obj, margin=0.35)
+        cropped = fp.get_face_crop(image_path_obj, margin=0.60)
         if cropped is not None:
+            # If the cropped face is small (< 512px), upscale it using Lanczos interpolation
+            # so reverse search engines recognize human portrait facial features rather than small gadgets
+            ch, cw = cropped.shape[:2]
+            if ch < 512 or cw < 512:
+                cropped = cv2.resize(cropped, (640, 640), interpolation=cv2.INTER_LANCZOS4)
+
             _info("No candidates above threshold with original image.")
             _info("Retrying web search with focused portrait face crop...")
             print()
@@ -1373,8 +1382,8 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.70,
-        help="Minimum face similarity threshold (default: 0.70).",
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        help=f"Minimum face similarity threshold (default: {DEFAULT_SIMILARITY_THRESHOLD:.2f}).",
     )
     parser.add_argument(
         "--platform",

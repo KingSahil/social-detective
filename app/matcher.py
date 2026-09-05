@@ -182,6 +182,13 @@ class FaceMatcher:
         try:
             img = self._download_image(candidate.image_url)
             if img is None:
+                # Attempt recovery if source_url is a supported social / post platform
+                # with expired or rotating CDN image URLs (e.g. LinkedIn, Instagram, X)
+                img, recovered_url = self._recover_candidate_image(query_embedding, candidate)
+                if recovered_url:
+                    candidate.image_url = recovered_url
+
+            if img is None:
                 return MatchResult(
                     candidate=candidate,
                     similarity=0.0,
@@ -229,6 +236,83 @@ class FaceMatcher:
                 face_detected=False,
                 error=str(e),
             )
+
+    def _recover_candidate_image(
+        self, query_embedding: np.ndarray, candidate: Candidate
+    ) -> tuple[Optional[np.ndarray], str]:
+        """
+        Attempt to recover live image media when the candidate's image_url returned 404 / expired.
+        Especially effective for LinkedIn, Instagram, and X where CDNs expire tokens rapidly.
+        """
+        import re
+        src = (candidate.source_url or "").strip()
+        if not src:
+            return None, ""
+
+        # 1. LinkedIn Post: linkedin.com/posts/{slug}_{activity_id}
+        if "linkedin.com/posts/" in src:
+            try:
+                from app.linkedin import harvest_linkedin_post
+                harvested = harvest_linkedin_post(src, timeout=min(6.0, self._timeout * 2))
+                best_sim = -1.0
+                best_img = None
+                best_url = ""
+                for h_cand in harvested:
+                    h_img = self._download_image(h_cand.image_url)
+                    if h_img is None:
+                        continue
+                    faces = self._fp._app.get(h_img)
+                    if faces:
+                        sims = [cosine_similarity(query_embedding, f.embedding) for f in faces if f.embedding is not None]
+                        if sims:
+                            m_sim = max(sims)
+                            if m_sim > best_sim:
+                                best_sim = m_sim
+                                best_img = h_img
+                                best_url = h_cand.image_url
+                if best_img is not None and best_sim >= 0.40:
+                    return best_img, best_url
+            except Exception:
+                pass
+
+        # 2. LinkedIn Profile: linkedin.com/in/{slug}
+        m_slug = re.search(r"linkedin\.com/in/([A-Za-z0-9_-]+)", src)
+        if m_slug:
+            slug = m_slug.group(1)
+            reserved = {"dir", "in", "pub", "feed", "posts", "company", "jobs", "groups", "school", "pulse"}
+            if slug.lower() not in reserved:
+                try:
+                    from app.linkedin import harvest_linkedin_post
+                    from app.search import _safe_ddgs_text
+                    hits = _safe_ddgs_text(f"site:linkedin.com/posts {slug}", max_results=3)
+                    best_sim = -1.0
+                    best_img = None
+                    best_url = ""
+                    for h in hits:
+                        purl = h.get("href", "")
+                        if "/posts/" in purl:
+                            harvested = harvest_linkedin_post(purl, timeout=min(6.0, self._timeout * 2))
+                            for h_cand in harvested:
+                                h_img = self._download_image(h_cand.image_url)
+                                if h_img is None:
+                                    continue
+                                faces = self._fp._app.get(h_img)
+                                if faces:
+                                    sims = [cosine_similarity(query_embedding, f.embedding) for f in faces if f.embedding is not None]
+                                    if sims:
+                                        m_sim = max(sims)
+                                        if m_sim > best_sim:
+                                            best_sim = m_sim
+                                            best_img = h_img
+                                            best_url = h_cand.image_url
+                            if best_sim >= 0.55:
+                                break
+                    if best_img is not None and best_sim >= 0.40:
+                        return best_img, best_url
+                except Exception:
+                    pass
+
+        return None, ""
 
     def _download_image(self, url: str) -> Optional[np.ndarray]:
         """Download an image URL and decode it as a BGR numpy array."""

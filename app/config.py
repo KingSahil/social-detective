@@ -46,7 +46,7 @@ NETWORK_NAME: str = "Ethereum Sepolia"
 # ---------------------------------------------------------------------------
 # Face matching
 # ---------------------------------------------------------------------------
-DEFAULT_SIMILARITY_THRESHOLD: float = 0.70
+DEFAULT_SIMILARITY_THRESHOLD: float = 0.60
 
 # ---------------------------------------------------------------------------
 # Identity pivot & username sweep
