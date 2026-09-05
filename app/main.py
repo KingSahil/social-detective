@@ -97,6 +97,7 @@ def run_pipeline(
     async_tx: bool = False,
     skip_blockchain: bool = False,
     no_memory: bool = False,
+    context: str | None = None,
 ) -> None:
     """Execute the full FaceTrace pipeline."""
 
@@ -223,14 +224,36 @@ def run_pipeline(
     )
 
     early_event_future = None
-    if has_ocr_credentials and not target and not handle:
+    if not target and not handle:
         clue_tokens = [f"#{h}" for h in ocr_clues.get("hashtags", [])] + [f"@{h}" for h in ocr_clues.get("handles", [])] + ocr_clues.get("entities", [])
         if clue_tokens:
             _ok(f"Extracted OCR credential clues: {', '.join(clue_tokens)}")
 
+        from app.geo import analyze_image_geolocation
+        geo_res = analyze_image_geolocation(image_path_obj, cached_ocr_clues=ocr_clues)
+        record["geolocation"] = {
+            "detected": geo_res.detected,
+            "location": geo_res.location_name,
+            "country": geo_res.country,
+            "region": geo_res.region,
+            "city": geo_res.city,
+            "coordinates": geo_res.coordinates,
+            "map_url": geo_res.map_url,
+            "confidence": geo_res.confidence,
+            "reasoning": geo_res.reasoning,
+        }
+        if geo_res.detected:
+            _ok(f"GEOINT: {geo_res.location_name}")
+            if geo_res.coordinates:
+                lat, lon = geo_res.coordinates
+                _info(f"Coords: {lat:.4f}° N, {lon:.4f}° E  (Map: {geo_res.map_url})")
+            _info(f"Confidence: {geo_res.confidence}")
+            for feat in geo_res.terrain_features:
+                _info(f"Scene Cue: {feat}")
+
         def _gather_early_event_candidates(img_path, clues_dict):
             from app.search import discover_osint_event_leads, TwitterProfileProvider
-            ev_handles, ev_cands, _ = discover_osint_event_leads(img_path, cached_clues=clues_dict)
+            ev_handles, ev_cands, _ = discover_osint_event_leads(img_path, cached_clues=clues_dict, allow_broad_sweep=True, context=context)
             results = list(ev_cands)
             extracted_by_handle = {}
             if ev_handles:
@@ -240,12 +263,13 @@ def run_pipeline(
                         return h, TwitterProfileProvider(h).search()
                     except Exception:
                         return h, None
-                fetch_handles = ev_handles[:6]
-                with ThreadPoolExecutor(max_workers=min(len(fetch_handles), 6)) as p:
-                    for h, res in p.map(_fetch, fetch_handles):
-                        if res and res.candidates:
-                            results.extend(res.candidates)
-                            extracted_by_handle[h] = len(res.candidates)
+                fetch_handles = [h for h in ev_handles if h != "247pmstudio" and "-" not in h][:4]
+                if fetch_handles:
+                    with ThreadPoolExecutor(max_workers=min(len(fetch_handles), 4)) as p:
+                        for h, res in p.map(_fetch, fetch_handles):
+                            if res and res.candidates:
+                                results.extend(res.candidates)
+                                extracted_by_handle[h] = len(res.candidates)
             return ev_handles, results, extracted_by_handle
 
         early_event_future = bg_executor.submit(
@@ -674,19 +698,25 @@ def run_pipeline(
 
         # 2. Multi-Modal Scene, Badge, Lanyard & Frame OCR Discovery (Cold-Start / No-Memory)
         from app.search import discover_osint_event_leads
-        event_handles, event_candidates, ocr_clues = discover_osint_event_leads(image_path_obj, cached_clues=ocr_clues)
+        event_handles, event_candidates, ocr_clues = discover_osint_event_leads(image_path_obj, cached_clues=ocr_clues, allow_broad_sweep=True, context=context)
         if ocr_clues.get("hashtags") or ocr_clues.get("handles") or ocr_clues.get("entities"):
             clue_tokens = [f"#{h}" for h in ocr_clues.get("hashtags", [])] + [f"@{h}" for h in ocr_clues.get("handles", [])] + ocr_clues.get("entities", [])
             _ok(f"Extracted OCR credential clues: {', '.join(clue_tokens)}")
+
+        if event_candidates and not matches:
+            ev_matches = matcher.match_and_rank(query_embedding, event_candidates)
+            if ev_matches:
+                all_matches = sorted(all_matches + ev_matches, key=lambda r: r.similarity, reverse=True)
+                matches = [m for m in all_matches if m.similarity >= threshold]
 
         # 3. Correlate across discovered, event-pivoted, and recalled social/web handles
         if not matches:
             all_pivot_handles = sorted(
                 recalled_handles | set(event_handles) | {h for h in discovered_handles if h not in recalled_handles}
-            )
+            )[:4]
 
             if all_pivot_handles:
-                _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles[:6]])}" + (f" (+{len(all_pivot_handles)-6} more)" if len(all_pivot_handles) > 6 else ""))
+                _info(f"Social Pivot: Correlating across {len(all_pivot_handles)} handle(s): {', '.join(['@' + h for h in all_pivot_handles])}")
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
                 def _fetch_tw(h: str):
@@ -746,7 +776,7 @@ def run_pipeline(
                         matches = [m for m in all_matches if m.similarity >= threshold]
 
     # If still no matches above threshold and not targeted, activate Associate Forensics Graph
-    if not matches and not target and not handle and not no_memory:
+    if not matches and not target and not handle:
         _info("Visual reverse search yielded 0 direct hits.")
         _info("Activating Associate Forensics Graph (Network Pivoting)...")
         print()
@@ -1101,6 +1131,14 @@ def main() -> None:
         help="Disable subject identity memory lookup to test cold-start discovery without past cases.",
     )
 
+    parser.add_argument(
+        "--context",
+        dest="context",
+        type=str,
+        default=None,
+        help="Event, organization, or campaign context keyword to guide dynamic OSINT search (e.g. 'HackHazards', 'Symbiosis').",
+    )
+
     # Verify subcommand
     verify_parser = subparsers.add_parser("verify", help="Verify a saved record.")
     verify_parser.add_argument(
@@ -1129,6 +1167,7 @@ def main() -> None:
             async_tx=getattr(args, "async_tx", False),
             skip_blockchain=getattr(args, "skip_blockchain", False),
             no_memory=getattr(args, "no_memory", False),
+            context=getattr(args, "context", None),
         )
 
     else:

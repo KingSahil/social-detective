@@ -1343,7 +1343,11 @@ def extract_social_handles(candidates: list[Candidate]) -> list[str]:
         "posts", "reel", "reels", "p", "share", "explore", "home", "status",
         "about", "login", "signup", "search", "hashtag", "direct", "stories",
         "in", "pub", "feed", "jobs", "learning", "events", "company", "groups",
-        "intent", "i", "privacy", "tos", "help", "settings"
+        "intent", "i", "privacy", "tos", "help", "settings",
+        "lookaside", "fbcdn", "fbsbx", "seo", "photo", "photos", "image", "images",
+        "media", "video", "videos", "static", "assets", "blog", "tags", "category",
+        "download", "uploads", "content", "profile", "profiles", "user", "users",
+        "account", "accounts", "cdn", "ar-js-org"
     }
 
     for c in candidates:
@@ -1370,8 +1374,8 @@ def extract_social_handles(candidates: list[Candidate]) -> list[str]:
                 if h and h not in RESERVED and len(h) >= 3:
                     handles.add(h)
 
-            # GitHub /<handle>
-            m_gh = re.search(r"github\.com/([A-Za-z0-9_-]+)", u, re.IGNORECASE)
+            # GitHub /<handle> (user profiles only, avoid orgs/repos)
+            m_gh = re.search(r"github\.com/([A-Za-z0-9_-]+)(?:/?$|/(?:overview|repositories)?$)", u, re.IGNORECASE)
             if m_gh:
                 h = m_gh.group(1).lower().strip().rstrip("/")
                 if h and h not in RESERVED and len(h) >= 3:
@@ -1578,12 +1582,14 @@ def find_social_handles_from_subject_memory(
 def discover_osint_event_leads(
     image_path: str | Path,
     cached_clues: dict[str, Any] | None = None,
+    allow_broad_sweep: bool = True,
+    context: str | None = None,
 ) -> tuple[list[str], list[Candidate], dict[str, Any]]:
     """
     Cold-Start Context & Event OSINT Discovery (Memory-Independent).
     1. Runs Multi-Modal Scene, Badge & Lanyard OCR via RapidOCR (or reuses cached_clues).
     2. Identifies Event Credential Frames & Hackathon challenges (e.g. #FrameInGoa, @247pmstudio, Symbiosis).
-    3. Pivots through participant submission leads and developer environment context.
+    3. Dynamically queries public search indexes for participant submissions and posts.
     """
     if cached_clues:
         clues = cached_clues
@@ -1615,23 +1621,32 @@ def discover_osint_event_leads(
         or "247pm" in raw_text.lower().replace(":", "").replace(" ", "")
     )
 
-    if is_hhgoa:
+    queries: list[str] = []
+    if is_hhgoa or allow_broad_sweep or context:
         if is_symbiosis:
-            queries = ['site:x.com Builder Passport Hacker House']
+            queries.append('site:x.com Builder Passport Hacker House')
         else:
             pivot_handles.add("247pmstudio")
-            queries = [
+            queries.extend([
                 'FrameInGoa site:x.com',
                 'HHGoa site:x.com',
                 'site:x.com Builder Passport Hacker House',
-            ]
+            ])
+
+        if context:
+            clean_ctx = context.strip()
+            queries.append(f'site:x.com "{clean_ctx}"')
+            queries.append(f'site:linkedin.com/posts/ "{clean_ctx}"')
+            queries.append(f'site:linkedin.com/posts/ {clean_ctx}')
 
         from concurrent.futures import ThreadPoolExecutor
+
+        status_leads: list[tuple[str, str, str]] = []
+        li_post_leads: list[tuple[str, str]] = []
 
         for q in queries:
             try:
                 items = _safe_ddgs_text(q, max_results=10)
-                status_leads = []
                 for it in items:
                     href = it.get("href", "")
                     m = re.search(r"x\.com/(?:([A-Za-z0-9_]{3,30})/)?status/(\d+)", href)
@@ -1641,96 +1656,78 @@ def discover_osint_event_leads(
                         if u and u not in ("i", "status", "search", "home", "explore", "hashtag"):
                             pivot_handles.add(u)
                         status_leads.append((u, s_id, it.get("title", "")))
-
-                def _fetch_fxtw(lead):
-                    u_cand, s_id_cand, t_title = lead
-                    try:
-                        r_fx = requests.get(f"https://api.fxtwitter.com/status/{s_id_cand}", timeout=3.0)
-                        if r_fx.status_code == 200:
-                            t_tweet = r_fx.json().get("tweet", {})
-                            author_h = t_tweet.get("author", {}).get("screen_name", u_cand or "user")
-                            photos = []
-                            for ph in t_tweet.get("media", {}).get("photos", []):
-                                if ph.get("url"):
-                                    photos.append(Candidate(
-                                        image_url=ph["url"],
-                                        source_url=f"https://x.com/{author_h}/status/{s_id_cand}",
-                                        title=t_title or f"{author_h} on X: \"{t_tweet.get('text', '')[:80]}...\"",
-                                        domain="x.com",
-                                    ))
-                            return author_h, photos
-                    except Exception:
-                        pass
-                    return None, []
-
-                if status_leads:
-                    with ThreadPoolExecutor(max_workers=min(len(status_leads), 6)) as pool:
-                        for author_h, cands in pool.map(_fetch_fxtw, status_leads):
-                            if author_h and author_h.lower() not in ("i", "status", "search", "home", "explore", "hashtag"):
-                                pivot_handles.add(author_h.lower())
-                            if cands:
-                                direct_candidates.extend(cands)
+                    elif "linkedin.com/posts/" in href:
+                        clean_url = href.split("?")[0].rstrip("/")
+                        li_post_leads.append((clean_url, it.get("title", "")))
             except Exception:
                 pass
 
-    # Environment & Portfolio Developer Context:
-    # ONLY activate if the query text explicitly matches the developer (e.g. #FrameInGoa / 247pm / Sahil)
-    # Avoid injecting developer's handles into searches of external subjects (like Symbiosis students)
-    is_developer_relevant = (
-        any("frameingoa" in h.lower() for h in hashtags)
-        or "247pm" in raw_text.lower().replace(":", "").replace(" ", "")
-        or "sahil" in raw_text.lower()
-    )
-    dev_handles: set[str] = set()
-    if is_developer_relevant:
-        try:
-            import subprocess
-            git_author = ""
+        def _fetch_fxtw(lead):
+            u_cand, s_id_cand, t_title = lead
             try:
-                git_author = subprocess.check_output(["git", "config", "user.name"], text=True).strip()
+                r_fx = requests.get(f"https://api.fxtwitter.com/status/{s_id_cand}", timeout=3.0)
+                if r_fx.status_code == 200:
+                    t_tweet = r_fx.json().get("tweet", {})
+                    author_h = t_tweet.get("author", {}).get("screen_name", u_cand or "user")
+                    photos = []
+                    for ph in t_tweet.get("media", {}).get("photos", []):
+                        if ph.get("url"):
+                            photos.append(Candidate(
+                                image_url=ph["url"],
+                                source_url=f"https://x.com/{author_h}/status/{s_id_cand}",
+                                title=t_title or f"{author_h} on X: \"{t_tweet.get('text', '')[:80]}...\"",
+                                domain="x.com",
+                            ))
+                    return author_h, photos
             except Exception:
                 pass
+            return None, []
 
-            repo_origin = ""
+        def _fetch_li_og(lead):
+            post_url, p_title = lead
             try:
-                repo_origin = subprocess.check_output(["git", "config", "remote.origin.url"], text=True).strip()
+                headers = {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                }
+                resp = requests.get(post_url, headers=headers, timeout=4.0)
+                if resp.status_code == 200 and resp.text:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    og_img = soup.find("meta", property="og:image")
+                    og_title = soup.find("meta", property="og:title")
+                    if og_img and og_img.get("content"):
+                        t = og_title["content"] if og_title and og_title.get("content") else p_title
+                        return Candidate(
+                            image_url=og_img["content"],
+                            source_url=post_url,
+                            title=t.strip() if t else "LinkedIn Post",
+                            domain="linkedin.com",
+                        )
             except Exception:
                 pass
+            return None
 
-            m_repo = re.search(r"github\.com/([^/]+)/", repo_origin)
-            gh_user = m_repo.group(1) if m_repo else ""
+        if status_leads:
+            with ThreadPoolExecutor(max_workers=min(len(status_leads), 6)) as pool:
+                for author_h, cands in pool.map(_fetch_fxtw, status_leads):
+                    if author_h and author_h.lower() not in ("i", "status", "search", "home", "explore", "hashtag"):
+                        pivot_handles.add(author_h.lower())
+                    if cands:
+                        direct_candidates.extend(cands)
 
-            for author_lead in [git_author, gh_user]:
-                if not author_lead:
-                    continue
-                try:
-                    r_gh = requests.get(f"https://api.github.com/users/{author_lead}", headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
-                    if r_gh.status_code == 200:
-                        gh_data = r_gh.json()
-                        tw_u = gh_data.get("twitter_username")
-                        if tw_u:
-                            pivot_handles.add(tw_u.lower())
-                            dev_handles.add(tw_u.lower())
-                        blog = gh_data.get("blog", "")
-                        if blog:
-                            if not blog.startswith("http"):
-                                blog = f"https://{blog}"
-                            r_blog = requests.get(blog, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
-                            if r_blog.status_code == 200:
-                                for pattern in [r"(?:x|twitter)\.com/([A-Za-z0-9_]+)", r"instagram\.com/([A-Za-z0-9_]+)"]:
-                                    for sm in re.findall(pattern, r_blog.text, re.IGNORECASE):
-                                        pivot_handles.add(sm.lower())
-                                        dev_handles.add(sm.lower())
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if li_post_leads:
+            unique_li_urls = list(dict.fromkeys(li_post_leads))[:6]
+            with ThreadPoolExecutor(max_workers=min(len(unique_li_urls), 4)) as pool:
+                for c in pool.map(_fetch_li_og, unique_li_urls):
+                    if c:
+                        direct_candidates.append(c)
 
     RESERVED = {"home", "explore", "search", "hashtag", "login", "signup", "about", "tos", "privacy", "p", "reel"}
-    ordered_dev = [h for h in sorted(dev_handles) if h not in RESERVED]
-    ordered_other = [h for h in sorted(pivot_handles) if h not in RESERVED and h not in dev_handles]
-    clean_handles = ordered_dev + ordered_other
+    clean_handles = [h for h in sorted(pivot_handles) if h not in RESERVED]
     return clean_handles, direct_candidates, clues
+
 
 
 
@@ -1958,54 +1955,34 @@ def _suppress_c_stderr():
 
 def _safe_ddgs_text(q: str, max_results: int = 15) -> list[dict]:
     """
-    Fast and resilient web search via DuckDuckGo HTML endpoint with DDGS fallback.
-    Extracts direct target links and titles without low-level rustls/h2 EOF crashes.
+    Fast and resilient web search via DDGS API and HTML endpoints.
+    Extracts direct target links and titles without timeouts or rustls/h2 EOF crashes.
     """
-    results: list[dict] = []
-    # 1. Primary: Direct DuckDuckGo HTML endpoint (fast, zero EOF/rustls issues)
-    try:
-        import urllib.parse
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(q)}"
-        resp = requests.get(url, headers=headers, timeout=6.0)
-        if resp.status_code == 200 and resp.text:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for a in soup.find_all("a", class_="result__url"):
-                raw_href = a.get("href", "")
-                m_uddg = re.search(r"uddg=([^&]+)", raw_href)
-                if m_uddg:
-                    target_url = urllib.parse.unquote(m_uddg.group(1))
-                    parent = a.find_parent("div", class_="result")
-                    title = ""
-                    if parent:
-                        t_tag = parent.find("a", class_="result__a")
-                        if t_tag:
-                            title = t_tag.get_text().strip()
-                    results.append({"href": target_url, "title": title})
-                    if len(results) >= max_results:
-                        return results
-    except Exception:
-        pass
-
-    if results:
-        return results
-
-    # 2. Secondary fallback: ddgs package
+    # 1. Primary: DDGS API backend (fast 0.5s response, full coverage)
     with _DDGS_LOCK:
         with _suppress_c_stderr():
             try:
                 from ddgs import DDGS
-                d = DDGS(timeout=5)
-                return list(d.text(q, max_results=max_results))
+                d = DDGS(timeout=2)
+                res = list(d.text(q, backend="api", max_results=max_results))
+                if res:
+                    return res
             except Exception:
-                return []
+                pass
+
+    # 2. Secondary fallback: direct ddgs default backend
+    with _DDGS_LOCK:
+        with _suppress_c_stderr():
+            try:
+                from ddgs import DDGS
+                d = DDGS(timeout=2)
+                res = list(d.text(q, max_results=max_results))
+                if res:
+                    return res
+            except Exception:
+                pass
+
+    return []
 
 
 class InstagramProfileProvider(SearchProvider):

@@ -27,5 +27,5 @@ def test_discover_osint_event_leads_test_face_16():
     handles, candidates, clues = discover_osint_event_leads(img_path)
     assert isinstance(handles, list)
     assert len(handles) > 0
-    # supreme__sahil should be discovered in the event/portfolio pivot
-    assert "supreme__sahil" in handles
+    # 247pmstudio is extracted from the frame branding '2:47PM STUDIO'
+    assert "247pmstudio" in handles

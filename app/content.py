@@ -158,6 +158,18 @@ class ContentRetriever:
                 except Exception:
                     pass
 
+        # Special handling for LinkedIn posts
+        if "linkedin.com" in domain and ("/posts/" in source_url or "/in/" in source_url):
+            if not content.author:
+                if content.title and "|" in content.title:
+                    content.author = content.title.split("|")[-1].strip()
+                elif "-activity-" in source_url:
+                    import re
+                    m_li = re.search(r"linkedin\.com/posts/([A-Za-z0-9_-]+?)_(?:.*)-activity-", source_url)
+                    if m_li:
+                        author_slug = m_li.group(1)
+                        content.author = re.sub(r"-[0-9a-fA-F]+$", "", author_slug).replace("-", " ").title()
+
         # Download the actual image bytes (for content hashing)
         try:
             img_headers = {
