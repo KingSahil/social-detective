@@ -172,147 +172,113 @@ Commercial facial search platforms (like PimEyes or FaceCheck.ID) rely on centra
 ```mermaid
 flowchart TD
     %% STYLING DEFINITIONS
-    classDef default fill:#1f2937,stroke:#475569,color:#f8fafc,stroke-width:1.5px
+    classDef default fill:#111827,stroke:#374151,color:#f9fafb,stroke-width:1.5px
     classDef inputNode fill:#0f172a,stroke:#38bdf8,color:#f8fafc,stroke-width:2px
     classDef aiNode fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff,stroke-width:2px
-    classDef memoryNode fill:#14532d,stroke:#22c55e,color:#f0fdf4,stroke-width:2px
-    classDef searchNode fill:#064e3b,stroke:#34d399,color:#ecfdf5,stroke-width:2px
+    classDef memoryNode fill:#064e3b,stroke:#10b981,color:#ecfdf5,stroke-width:2px
+    classDef searchNode fill:#134e4a,stroke:#14b8a6,color:#f0fdfa,stroke-width:2px
     classDef matchNode fill:#3b0764,stroke:#a855f7,color:#faf5ff,stroke-width:2px
     classDef cryptoNode fill:#701a75,stroke:#f472b6,color:#fdf2f8,stroke-width:2px
     classDef chainNode fill:#431407,stroke:#fb923c,color:#fff7ed,stroke-width:2px
-    classDef verifyNode fill:#082f49,stroke:#38bdf8,color:#f0f9ff,stroke-width:2px
-    classDef verifiedNode fill:#14532d,stroke:#22c55e,color:#f0fdf4,stroke-width:2.5px
-    classDef tamperedNode fill:#7f1d1d,stroke:#ef4444,color:#fef2f2,stroke-width:2.5px
+    classDef verifyNode fill:#082f49,stroke:#0ea5e9,color:#f0f9ff,stroke-width:2px
+    classDef passNode fill:#14532d,stroke:#22c55e,color:#f0fdf4,stroke-width:2.5px
+    classDef failNode fill:#7f1d1d,stroke:#ef4444,color:#fef2f2,stroke-width:2.5px
 
-    subgraph P1 ["Phase 1: Biometric Intake & Multimodal Analysis"]
-        IN(["Query Portrait Image<br/>e.g. query_face.jpg"]):::inputNode
-        CLI["CLI Parameters<br/>--threshold, --context, --handle, --platform, --target"]:::inputNode
-        DET["InsightFace Detector<br/>buffalo_l (5-Point Landmark Alignment)"]:::aiNode
-        EMB["ArcFace Embedding Engine<br/>512-Dimensional Normalized Vector"]:::aiNode
-        GEO["Multimodal GEOINT & Scene Analysis<br/>Terrain & Landmark Clue Estimation"]:::aiNode
-        CROP["Portrait Face Cropper<br/>Tight Bounding Box + 35% Margin"]:::aiNode
+    subgraph P1 ["Phase 1: Biometric Intake & Scene Intelligence"]
+        direction TB
+        IN(["Query Portrait & Parameters<br/>Image + CLI Flags (--context, --handle)"]):::inputNode
+        DET["InsightFace Detector (buffalo_l)<br/>5-Point Facial Landmark Alignment"]:::aiNode
+        EMB["ArcFace Embedding Engine<br/>Normalized 512-d Biometric Vector"]:::aiNode
+        GEO["Multimodal Scene & GEOINT<br/>Terrain & Environmental Analysis"]:::aiNode
 
         IN --> DET
         IN --> GEO
-        CLI -.->|"Configures flags"| DET
         DET --> EMB
-        DET --> CROP
     end
 
-    subgraph P2 ["Phase 2: Decentralized Memory & Pre-Search Vector Lookup"]
-        KG[("IdentityKnowledgeGraph<br/>data/memory/knowledge_graph.json")]:::memoryNode
-        W3_SYNC["Web3MemorySyncer<br/>--sync-web3 from Sepolia Events & IPFS"]:::memoryNode
-        V_LOOKUP["Vector Graph Search<br/>Cosine Similarity over Past Indexed Faces"]:::memoryNode
-        SEED_HANDLES["Extracted Known Handles & Context<br/>Seeded into Live Search Cascade"]:::memoryNode
+    subgraph P2 ["Phase 2: Decentralized Web3 Memory & Graph Lookup"]
+        direction TB
+        W3_SYNC["Web3 Event Syncer (--sync-web3)<br/>Sepolia Event Logs + Public IPFS Gateways"]:::memoryNode
+        KG[("Identity Knowledge Graph<br/>data/memory/knowledge_graph.json")]:::memoryNode
+        V_LOOKUP["Vector Graph Search<br/>Cosine Similarity over Indexed Faces"]:::memoryNode
 
-        W3_SYNC -.->|"Syncs IPFS CIDs"| KG
-        EMB --> V_LOOKUP
+        W3_SYNC --> KG
         KG --> V_LOOKUP
-        V_LOOKUP -->|"Known Person Found"| SEED_HANDLES
     end
 
-    subgraph P3 ["Phase 3: Multi-Engine Dynamic Search Cascade"]
-        ROUTER{"Execution Mode<br/>Target vs Handle vs Cascade"}:::searchNode
-        T_URL["Target URL Inspector<br/>Direct Instagram, X/Twitter, Web"]:::searchNode
-        T_HANDLE["Multi-Platform Handle Sweeper<br/>Concurrent Instagram & Twitter Timelines"]:::searchNode
+    subgraph P3 ["Phase 3: Dynamic Multi-Engine Search Cascade"]
+        direction TB
+        SEARCH_ROUTER{"Multi-Engine Search Router"}:::searchNode
 
-        LENS["Primary: Google Lens Visual Search<br/>SerpAPI Reverse Image Discovery"]:::searchNode
-        LENS_STEALTH["Fallback 1: Headless Lens<br/>Zero-CAPTCHA Offscreen Rendering"]:::searchNode
-        YANDEX["Fallback 2: Yandex Images<br/>Direct Deep Biometric Search"]:::searchNode
-        CONTEXT_DORK["Dynamic Context Dorking<br/>--context keywords + Google / DDG Dorks"]:::searchNode
-
-        subgraph PIVOT_SYS ["OSINT Pivoting & Media Extraction"]
-            TW_PIVOT["X/Twitter Media Timeline Provider"]:::searchNode
-            IG_PIVOT["Instagram Reels & Carousel Provider"]:::searchNode
-            LI_PIVOT["LinkedIn Network Associate Extraction"]:::searchNode
-            UNPACK["Media & Carousel Unpacker<br/>Extracts Multi-Slide Carousels & Video Covers"]:::searchNode
-        end
+        T_SEARCH["Direct Target Mode<br/>Instagram, X/Twitter, Web URLs"]:::searchNode
+        LENS_CASCADE["Visual Reverse Cascade<br/>SerpAPI ➔ Zero-CAPTCHA Headless ➔ Yandex"]:::searchNode
+        OSINT_PIVOT["OSINT Pivoting & Dorking<br/>WhatsMyName, LinkedIn, Context Dorks"]:::searchNode
 
         MEDIA_POOL[("Candidate Media Pool<br/>High-Res Images, Video Covers, Post URLs")]:::searchNode
 
-        EMB --> ROUTER
-        SEED_HANDLES -.-> ROUTER
-        CLI -.->|"Context Text"| CONTEXT_DORK
-        CONTEXT_DORK --> MEDIA_POOL
+        SEARCH_ROUTER -->|"--target / --handle"| T_SEARCH
+        SEARCH_ROUTER -->|"Reverse Visual"| LENS_CASCADE
+        SEARCH_ROUTER -->|"Pivoting & Dorks"| OSINT_PIVOT
 
-        ROUTER -->|"--target URL"| T_URL
-        ROUTER -->|"--handle USER"| T_HANDLE
-        ROUTER -->|"Default: Open Web Cascade"| LENS
-
-        LENS -->|"Quota / Fail"| LENS_STEALTH
-        LENS_STEALTH -->|"Fail / Empty"| YANDEX
-        YANDEX -->|"Pivoting"| LI_PIVOT
-
-        T_URL --> MEDIA_POOL
-        T_HANDLE --> MEDIA_POOL
-        LENS --> MEDIA_POOL
-        LENS_STEALTH --> MEDIA_POOL
-        YANDEX --> MEDIA_POOL
-        TW_PIVOT --> MEDIA_POOL
-        IG_PIVOT --> MEDIA_POOL
-        LI_PIVOT --> MEDIA_POOL
-        UNPACK --> MEDIA_POOL
+        T_SEARCH --> MEDIA_POOL
+        LENS_CASCADE --> MEDIA_POOL
+        OSINT_PIVOT --> MEDIA_POOL
     end
 
-    subgraph P4 ["Phase 4: Biometric Verification & Candidate Ranking"]
-        CAND_EMB["Candidate Face Processor<br/>Extract 512-d ArcFace Vector per Candidate"]:::aiNode
-        MATCHER["FaceMatcher Engine<br/>Cosine Similarity = dot(q, c) / (||q|| * ||c||)"]:::matchNode
-        FILTER["Ranking & Threshold Filter<br/>Score Meets Threshold (e.g. 70%)"]:::matchNode
-        WINNER(["Rank #1 Strongest Match Selected<br/>Highest Facial Similarity Score"]):::matchNode
+    subgraph P4 ["Phase 4: Biometric Matching & Ranking"]
+        direction TB
+        CAND_EMB["Candidate Face Processor<br/>Extract 512-d ArcFace Vector per Face"]:::aiNode
+        MATCHER["Cosine Similarity Engine<br/>Score = dot(q, c) / (||q|| * ||c||)"]:::matchNode
+        WINNER(["Rank #1 Top Visual Match<br/>Highest Similarity (Threshold e.g. 70%+)"]):::matchNode
 
         MEDIA_POOL --> CAND_EMB
-        EMB -.->|"Query Vector (512-d)"| MATCHER
         CAND_EMB --> MATCHER
-        MATCHER --> FILTER
-        FILTER --> WINNER
+        MATCHER --> WINNER
     end
 
-    subgraph P5 ["Phase 5: Forensic Acquisition, IPFS Packaging & Canonical Hashing"]
-        ACQUIRE["Content Retriever<br/>Fetch Post HTML, Text, Author, Timestamp"]:::cryptoNode
-        IMG_DOWNLOAD["Media Ingestion<br/>Download Raw Image / Thumbnail Bytes"]:::cryptoNode
-        IMG_HASH["Image Cryptographic Hash<br/>Compute SHA-256 of Raw Image Bytes"]:::cryptoNode
-        CANON["Forensic Canonicalizer<br/>Deterministic Sorted JSON Key-Value Map"]:::cryptoNode
-        IPFS_PUB["IPFS Deterministic Client<br/>Generates CIDv1 (bafkrei...)"]:::cryptoNode
-        SHA["SHA-256 Fingerprint Generator<br/>Produces 32-Byte bytes32 Content Hash"]:::cryptoNode
+    subgraph P5 ["Phase 5: Canonical Packaging & IPFS Fingerprinting"]
+        direction TB
+        ACQUIRE["Forensic Content Acquisition<br/>Post Text, Metadata, Author, Media Bytes"]:::cryptoNode
+        CANON["RFC Canonical Serialization<br/>Deterministic Sorted JSON Representation"]:::cryptoNode
+        IPFS_PUB["IPFS CIDv1 Generator<br/>bafkrei... Content-Addressed Hash"]:::cryptoNode
+        SHA["SHA-256 Digest Generator<br/>Unique 32-Byte bytes32 Content Hash"]:::cryptoNode
 
-        WINNER --> ACQUIRE
-        WINNER --> IMG_DOWNLOAD
-        IMG_DOWNLOAD --> IMG_HASH
         ACQUIRE --> CANON
-        IMG_HASH --> CANON
         CANON --> IPFS_PUB
         CANON --> SHA
     end
 
     subgraph P6 ["Phase 6: Blockchain Notarization & Memory Consolidation"]
-        WEB3["Web3.py Client<br/>Sign & Submit Transaction to Ethereum Sepolia"]:::chainNode
-        CONTRACT[("ContentRegistry.sol Smart Contract<br/>Address: 0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21<br/>Ethereum Sepolia Testnet")]:::chainNode
-        DOSSIER[("Local Forensic Dossier<br/>Saved to data/results/*_record.json")]:::chainNode
+        direction TB
+        WEB3["Web3.py Client<br/>Sign ECDSA Notarization Tx"]:::chainNode
+        CONTRACT[("ContentRegistry.sol Smart Contract<br/>0xe25BfF359d31b3E2B3fF99692E6cE025f273BC21 (Sepolia)")]:::chainNode
+        DOSSIER[("Local Forensic Dossier & Memory<br/>data/results/ & data/memory/")]:::chainNode
 
-        SHA -->|"bytes32 contentHash"| WEB3
-        IPFS_PUB -->|"ipfs://CIDv1 in sourceId"| WEB3
-        WEB3 -->|"registerRecord(hash, sourceId)"| CONTRACT
-        CONTRACT -.->|"Tx Hash & Block Confirmation"| DOSSIER
-        DOSSIER -.->|"Update Local Memory"| KG
+        WEB3 -->|"registerRecord(hash, sourceId|ipfs://cid)"| CONTRACT
+        CONTRACT -->|"Confirmed Block & Tx Hash"| DOSSIER
     end
 
-    subgraph P7 ["Phase 7: Independent Verification & Tamper Detection"]
-        V_CLI["facetrace verify --record record.json<br/>CLI Verification Tool"]:::verifyNode
-        V_LOCAL["Recompute Canonical SHA-256 Hash<br/>From Local Record Fields"]:::verifyNode
-        V_QUERY["Query Smart Contract<br/>Check ContentRegistry.records(hash)"]:::verifyNode
-        V_CHECK{"Integrity Check:<br/>Local Hash == On-Chain Hash?"}:::verifyNode
+    subgraph P7 ["Phase 7: Independent Audit & Tamper Detection"]
+        direction TB
+        V_AUDIT["Audit Engine (facetrace verify)<br/>Recompute Canonical SHA-256 Hash"]:::verifyNode
+        V_CHECK{"Integrity Check:<br/>Local == On-Chain?"}:::verifyNode
+        V_PASS(["✓ CONTENT VERIFIED<br/>100% Authentic & Untampered"]):::passNode
+        V_FAIL(["✗ TAMPER DETECTED<br/>Content or Metadata Modified"]):::failNode
 
-        V_PASS(["✓ CONTENT VERIFIED<br/>Proof Intact: 100% Authentic & Untampered"]):::verifiedNode
-        V_FAIL(["✗ TAMPER DETECTED<br/>Hash Mismatch: Text, Image, or Meta Altered"]):::tamperedNode
-
-        DOSSIER -.->|"Audit Target"| V_CLI
-        V_CLI --> V_LOCAL
-        V_CLI --> V_QUERY
-        V_LOCAL --> V_CHECK
-        V_QUERY --> V_CHECK
-        V_CHECK -->|"Identical Hash Found On-Chain"| V_PASS
-        V_CHECK -->|"Hash Differs or Not Registered"| V_FAIL
+        V_AUDIT --> V_CHECK
+        V_CHECK -->|"Identical Hash"| V_PASS
+        V_CHECK -->|"Hash Mismatch"| V_FAIL
     end
+
+    %% PIPELINE TRANSITIONS
+    EMB -->|"Query Vector"| V_LOOKUP
+    V_LOOKUP -->|"Prior Leads & Handles"| SEARCH_ROUTER
+    GEO -.->|"Scene Context"| SEARCH_ROUTER
+    EMB -.->|"Query Vector"| MATCHER
+    WINNER --> ACQUIRE
+    SHA -->|"bytes32 hash"| WEB3
+    IPFS_PUB -->|"ipfs://CIDv1"| WEB3
+    DOSSIER -->|"Audit Record"| V_AUDIT
 ```
 
 ---
