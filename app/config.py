@@ -49,6 +49,21 @@ NETWORK_NAME: str = "Ethereum Sepolia"
 DEFAULT_SIMILARITY_THRESHOLD: float = 0.70
 
 # ---------------------------------------------------------------------------
+# Identity pivot & username sweep
+# ---------------------------------------------------------------------------
+PIVOT_ENABLED: bool = os.getenv("PIVOT_ENABLED", "true").lower() not in ("false", "0", "no")
+PIVOT_ENGINE: str = os.getenv("PIVOT_ENGINE", "wmn")
+PIVOT_MAX_SITES: int = int(os.getenv("PIVOT_MAX_SITES", "300"))
+PIVOT_TIMEOUT: float = float(os.getenv("PIVOT_TIMEOUT", "8.0"))
+PIVOT_SWEEP_TIMEOUT: float = float(os.getenv("PIVOT_SWEEP_TIMEOUT", "30.0"))
+PIVOT_MAX_WORKERS: int = int(os.getenv("PIVOT_MAX_WORKERS", "12"))
+PIVOT_MAX_ACCOUNTS: int = int(os.getenv("PIVOT_MAX_ACCOUNTS", "25"))
+PIVOT_MAX_CANDIDATES: int = int(os.getenv("PIVOT_MAX_CANDIDATES", "50"))
+PIVOT_EXHAUSTIVE: bool = os.getenv("PIVOT_EXHAUSTIVE", "false").lower() not in ("false", "0", "no")
+PIVOT_BROWSER_FALLBACK: bool = os.getenv("PIVOT_BROWSER_FALLBACK", "false").lower() not in ("false", "0", "no")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

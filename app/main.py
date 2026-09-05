@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -190,12 +191,18 @@ def run_pipeline(
         p_lower = (platform or "").lower().strip()
         do_ig = p_lower in {"instagram", "ig", "insta"} or p_lower in {"all", ""}
         do_tw = p_lower in {"twitter", "x"} or p_lower in {"all", ""}
+        # LinkedIn has no handles: profiles are name-slugs (e.g. gourish-julka-472a1632b).
+        # The --handle keyword is treated as a name and matched via site: dorks +
+        # public post-page rendering. Opt out with --platform instagram|twitter.
+        do_li = p_lower in {"linkedin"} or p_lower in {"all", ""}
 
         target_platforms = []
         if do_tw:
             target_platforms.append("X/Twitter")
         if do_ig:
             target_platforms.append("Instagram")
+        if do_li:
+            target_platforms.append("LinkedIn")
 
         _info(f"Searching {', '.join(target_platforms)} for: {C_CYAN}@{clean_handle}{C_RESET}")
         _info("Extracting candidate media...")
@@ -219,9 +226,71 @@ def run_pipeline(
             except Exception:
                 return []
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        def _search_linkedin() -> list[Candidate]:
+            try:
+                from app.linkedin import harvest_linkedin_post
+                from app.search import _safe_ddgs_text
+
+                post_urls: set[str] = set()
+                # LinkedIn profiles are name slugs, not handles: split camelCase
+                # into words for site: dorks ("GourishJulka" -> "Gourish Julka").
+                name_q = re.sub(r"(?<!^)(?=[A-Z])", " ", clean_handle).strip() or clean_handle
+                dorks = [
+                    f"site:linkedin.com/in {name_q}",
+                    f"site:linkedin.com/posts {name_q}",
+                ]
+                hits: list[dict] = []
+
+                # Primary: SerpAPI dork search (reliable, key-gated).
+                api_key = require_search_config(optional=True)
+                if api_key:
+                    try:
+                        import serpapi as serpapi_mod
+                        client = serpapi_mod.Client(api_key=api_key)
+                        for d in dorks:
+                            for engine in ("duckduckgo", "google"):
+                                try:
+                                    res = client.search({"engine": engine, "q": d})
+                                    for it in res.get("organic_results", []):
+                                        hits.append({"href": it.get("link", "")})
+                                    if any("linkedin.com" in h.get("href", "") for h in hits):
+                                        break
+                                except Exception:
+                                    continue
+                            if any("linkedin.com/posts/" in h.get("href", "") for h in hits):
+                                break
+                    except Exception:
+                        pass
+
+                # Fallback: DuckDuckGo (free, but rate-limits after heavy use).
+                if not any("linkedin.com" in h.get("href", "") for h in hits):
+                    for d in dorks:
+                        hits.extend(_safe_ddgs_text(d, max_results=10))
+
+                for it in hits:
+                    href = it.get("href", "") or it.get("link", "")
+                    if "linkedin.com/posts/" in href:
+                        post_urls.add(href.split("?")[0].rstrip("/"))
+
+                cands: list[Candidate] = []
+                seen_imgs: set[str] = set()
+                for purl in sorted(post_urls)[:5]:
+                    try:
+                        for c in harvest_linkedin_post(purl, timeout=12.0, max_photos=4):
+                            if c.image_url in seen_imgs:
+                                continue
+                            seen_imgs.add(c.image_url)
+                            cands.append(c)
+                    except Exception:
+                        continue
+                return cands
+            except Exception:
+                return []
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
             tw_fut = pool.submit(_search_twitter) if do_tw else None
             ig_fut = pool.submit(_search_instagram) if do_ig else None
+            li_fut = pool.submit(_search_linkedin) if do_li else None
 
             if tw_fut:
                 tw_cands = tw_fut.result()
@@ -233,6 +302,11 @@ def run_pipeline(
                 if ig_cands:
                     all_candidates.extend(ig_cands)
                     _ok(f"Extracted {len(ig_cands)} media candidate(s) from @{clean_handle} on Instagram")
+            if li_fut:
+                li_cands = li_fut.result()
+                if li_cands:
+                    all_candidates.extend(li_cands)
+                    _ok(f"Extracted {len(li_cands)} image candidate(s) from LinkedIn public posts for {clean_handle}")
 
         search_result = SearchResult(
             candidates=all_candidates,
@@ -270,6 +344,7 @@ def run_pipeline(
             YandexProvider,
             TwitterProfileProvider,
             InstagramProfileProvider,
+            UsernameSweepProvider,
             SearchResult,
             extract_social_handles,
             find_social_handles_from_subject_memory,
@@ -366,20 +441,46 @@ def run_pipeline(
                     except Exception:
                         return None
 
-                with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 1, 6)) as pool:
+                with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 2, 8)) as pool:
                     futures = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
                     ig_fut = pool.submit(_fetch_ig)
+                    wmn_fut = pool.submit(lambda: UsernameSweepProvider(handles=all_pivot_handles).search())
+
+                    existing_cand_keys = {(c.source_url, c.image_url) for c in search_result.candidates}
 
                     for fut in as_completed(futures):
                         h, tw_res = fut.result()
                         if tw_res and tw_res.candidates:
-                            search_result.candidates.extend(tw_res.candidates)
-                            _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
+                            for c in tw_res.candidates:
+                                key = (c.source_url, c.image_url)
+                                if key not in existing_cand_keys:
+                                    existing_cand_keys.add(key)
+                                    search_result.candidates.append(c)
+                            _ok(f"Extracted media candidate(s) from @{h} on X/Twitter")
 
                     ig_res = ig_fut.result()
                     if ig_res and ig_res.candidates:
-                        search_result.candidates.extend(ig_res.candidates)
+                        for c in ig_res.candidates:
+                            key = (c.source_url, c.image_url)
+                            if key not in existing_cand_keys:
+                                existing_cand_keys.add(key)
+                                search_result.candidates.append(c)
                         _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+
+                    try:
+                        wmn_res = wmn_fut.result()
+                        if wmn_res and wmn_res.candidates:
+                            added_wmn = 0
+                            for c in wmn_res.candidates:
+                                key = (c.source_url, c.image_url)
+                                if key not in existing_cand_keys:
+                                    existing_cand_keys.add(key)
+                                    search_result.candidates.append(c)
+                                    added_wmn += 1
+                            if added_wmn:
+                                _ok(f"Extracted {added_wmn} candidate(s) from WhatsMyName cross-platform username sweep")
+                    except Exception as e:
+                        _info(f"Username sweep notice: {e}")
 
                 candidate_count = len(search_result.candidates)
 
@@ -526,20 +627,49 @@ def run_pipeline(
                     return None
 
             new_pivot_candidates = []
-            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 1, 6)) as pool:
+            with ThreadPoolExecutor(max_workers=min(len(all_pivot_handles) + 2, 8)) as pool:
                 futures = {pool.submit(_fetch_tw, h): h for h in all_pivot_handles}
                 ig_fut = pool.submit(_fetch_ig)
+                wmn_fut = pool.submit(lambda: UsernameSweepProvider(handles=all_pivot_handles).search())
+
+                existing_cand_keys = {
+                    (c.source_url, c.image_url)
+                    for c in search_result.candidates
+                }
 
                 for fut in as_completed(futures):
                     h, tw_res = fut.result()
                     if tw_res and tw_res.candidates:
-                        new_pivot_candidates.extend(tw_res.candidates)
-                        _ok(f"Extracted {len(tw_res.candidates)} media candidate(s) from @{h} on X/Twitter")
+                        for c in tw_res.candidates:
+                            key = (c.source_url, c.image_url)
+                            if key not in existing_cand_keys:
+                                existing_cand_keys.add(key)
+                                new_pivot_candidates.append(c)
+                        _ok(f"Extracted media candidate(s) from @{h} on X/Twitter")
 
                 ig_res = ig_fut.result()
                 if ig_res and ig_res.candidates:
-                    new_pivot_candidates.extend(ig_res.candidates)
+                    for c in ig_res.candidates:
+                        key = (c.source_url, c.image_url)
+                        if key not in existing_cand_keys:
+                            existing_cand_keys.add(key)
+                            new_pivot_candidates.append(c)
                     _ok(f"Extracted {len(ig_res.candidates)} candidate(s) from Instagram profile & post sweep")
+
+                try:
+                    wmn_res = wmn_fut.result()
+                    if wmn_res and wmn_res.candidates:
+                        added_wmn = 0
+                        for c in wmn_res.candidates:
+                            key = (c.source_url, c.image_url)
+                            if key not in existing_cand_keys:
+                                existing_cand_keys.add(key)
+                                new_pivot_candidates.append(c)
+                                added_wmn += 1
+                        if added_wmn:
+                            _ok(f"Extracted {added_wmn} candidate(s) from WhatsMyName cross-platform username sweep")
+                except Exception as e:
+                    _info(f"Username sweep notice: {e}")
 
             if new_pivot_candidates:
                 _info("Analyzing social pivot candidate similarity...")
@@ -555,6 +685,7 @@ def run_pipeline(
         print()
         from app.search import extract_associate_network_leads, LinkedInPostProvider
         assoc_names, assoc_contexts = extract_associate_network_leads()
+        li_res = None
         if assoc_names:
             assoc_display = ", ".join(assoc_names[:4]) + (f" (+{len(assoc_names)-4} more)" if len(assoc_names) > 4 else "")
             _info(f"Correlating with {len(assoc_names)} known network associate(s): {assoc_display}")
@@ -574,6 +705,58 @@ def run_pipeline(
             except Exception as e:
                 _info(f"LinkedIn associate sweep skipped: {e}")
 
+            # LinkedIn public-post deep harvest: render discovered post URLs and
+            # extract ALL embedded media (post images + profile photos) plus
+            # associate slugs for follow-up identity sweeps.
+            if not matches:
+                try:
+                    from app.linkedin import harvest_linkedin_post
+                    from app.search import _safe_ddgs_text
+
+                    name_query = " ".join(assoc_names[:2])
+                    post_urls: set[str] = set()
+                    for it in _safe_ddgs_text(
+                        f"site:linkedin.com/posts {name_query}", max_results=10
+                    ):
+                        href = it.get("href", "") or it.get("link", "")
+                        if "linkedin.com/posts/" in href:
+                            post_urls.add(href.split("?")[0].rstrip("/"))
+
+                    # Also reuse post URLs found by the associate sweep above
+                    try:
+                        for c in (li_res.candidates if li_res else []):
+                            if "linkedin.com/posts/" in (c.source_url or ""):
+                                post_urls.add(c.source_url.split("?")[0].rstrip("/"))
+                    except Exception:
+                        pass
+
+                    if post_urls:
+                        _info(f"Rendering {len(post_urls)} public LinkedIn post page(s) for embedded media...")
+                        li_deep: list = []
+                        seen_imgs: set[str] = set()
+                        existing_keys = {(m.candidate.source_url, m.candidate.image_url) for m in all_matches}
+                        for purl in sorted(post_urls)[:3]:
+                            try:
+                                for c in harvest_linkedin_post(purl, timeout=12.0, max_photos=4):
+                                    if c.image_url in seen_imgs:
+                                        continue
+                                    seen_imgs.add(c.image_url)
+                                    if (c.source_url, c.image_url) in existing_keys:
+                                        continue
+                                    li_deep.append(c)
+                            except Exception:
+                                continue
+                        if li_deep:
+                            _ok(f"{len(li_deep)} image candidate(s) extracted from LinkedIn post pages")
+                            _info("Analyzing LinkedIn post-page similarity...")
+                            print()
+                            deep_matches = matcher.match_and_rank(query_embedding, li_deep)
+                            if deep_matches:
+                                all_matches = sorted(all_matches + deep_matches, key=lambda r: r.similarity, reverse=True)
+                                matches = [m for m in all_matches if m.similarity >= threshold]
+                except Exception as e:
+                    _info(f"LinkedIn post-page harvest skipped: {e}")
+
     # Display top results (show up to 10)
     display_matches = all_matches[:10]
     for i, m in enumerate(display_matches, 1):
@@ -589,6 +772,27 @@ def run_pipeline(
         if all_matches and all_matches[0].similarity > 0:
             top_sim = all_matches[0].similarity * 100
             print(f"  Highest candidate similarity was {top_sim:.1f}%")
+        
+        # Forensic Negative Report Summary
+        if not target and not handle:
+            swept_handles = set()
+            try:
+                swept_handles = set(find_social_handles_from_subject_memory(query_embedding, fp=fp))
+                if "search_result" in locals() and hasattr(search_result, "candidates"):
+                    swept_handles.update(extract_social_handles(search_result.candidates))
+            except Exception:
+                pass
+            
+            print()
+            _info("--- Forensic Negative Report ---")
+            _info(f"Identity handles evaluated: {len(swept_handles)}" + (f" ({', '.join(['@' + h for h in sorted(swept_handles)[:4]])})" if swept_handles else ""))
+            _info(f"Total biometric candidates evaluated: {len(all_matches)}")
+            _info(f"Primary search engine: {engine}")
+            if all_matches and all_matches[0].similarity > 0:
+                _info(f"Best cross-engine similarity: {all_matches[0].similarity * 100:.1f}%")
+            else:
+                _info("Best cross-engine similarity: 0.0% (No matching faces detected)")
+
         print("  Try lowering the threshold with --threshold 0.50")
         print()
         sys.exit(1)

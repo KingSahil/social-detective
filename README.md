@@ -322,7 +322,50 @@ flowchart TD
 * Execute targeted sweeps across a suspected identity without manual URL scraping:
   * `--handle USER --platform instagram`: Sweeps public Instagram posts and reels.
   * `--handle USER --platform twitter`: Extracts media tweets from the user's timeline.
-  * `--handle USER`: Concurrently sweeps **both** platforms, merging all discovered media into the comparison pool.
+  * `--handle USER`: Concurrently sweeps **all three** platforms (X/Twitter, Instagram, LinkedIn), merging all discovered media into the comparison pool.
+
+#### LinkedIn leg (`--handle` + LinkedIn)
+LinkedIn profiles do not use handles (they use name slugs like `gourish-julka-472a1632b`), so the `--handle` keyword is treated as a **name** for LinkedIn:
+* `GourishJulka` is split into `Gourish Julka` (camelCase aware) and run through `site:linkedin.com/in` and `site:linkedin.com/posts` dorks (SerpAPI primary when a key is configured, free DuckDuckGo fallback).
+* Discovered **public post pages** are rendered and every embedded photo (post images + member profile photos) enters the biometric pool.
+* Opt out of the LinkedIn leg with `--platform instagram` or `--platform twitter`; force only it with `--platform linkedin`.
+* Profile pages themselves are never accessed (authwall; see section 7).
+
+### 6. Identity Pivots: Cross-Platform Username Sweep (WhatsMyName)
+When visual reverse search yields no strong biometric match, FaceTrace pivots on **identity** instead of the face: it takes every candidate handle (recalled from subject memory, extracted from search-result titles/URLs, or passed via `--handle`) and checks it across hundreds of platforms using the community-maintained [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset (716 sites, vendored at `data/wmn/`). Discovered public profile images (avatars, profile `og:image`) are validated and fed into the same biometric matching pool as visual search results.
+
+* **Strict evidence logic**: an account counts as found only on `e_code` + `e_string` dual evidence; soft-404s and login redirects are treated as misses.
+* **Tiered site selection**: by default only media-relevant categories (social, coding, tech, images, art, blog, music, video, gaming) without bot protection are checked, capped at 300 sites per handle. Set `PIVOT_EXHAUSTIVE=true` for the full list.
+* **Bounded runtime**: per-check timeout, global sweep budget, connection pooling, per-site error isolation; a single slow or failing site never aborts the sweep.
+* **False-positive guards**: handles are normalized and length-checked, generic names (admin, john, test, ...) are skipped, account hits per handle are capped, and the total candidates fed to the matcher are capped.
+
+#### Identity Pivot Configuration (env vars, defaults shown)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PIVOT_ENABLED` | `true` | Master switch for the username-sweep pivot |
+| `PIVOT_ENGINE` | `wmn` | Sweep engine (native WhatsMyName) |
+| `PIVOT_MAX_SITES` | `300` | Max sites checked per handle |
+| `PIVOT_TIMEOUT` | `8.0` | Per-site check timeout (seconds) |
+| `PIVOT_SWEEP_TIMEOUT` | `30.0` | Global sweep budget (seconds) |
+| `PIVOT_MAX_WORKERS` | `12` | Concurrent site checks |
+| `PIVOT_MAX_ACCOUNTS` | `25` | Max account hits per handle |
+| `PIVOT_MAX_CANDIDATES` | `50` | Max harvested images fed to the matcher |
+| `PIVOT_EXHAUSTIVE` | `false` | Check all non-NSFW sites instead of the Tier 1 subset |
+| `PIVOT_BROWSER_FALLBACK` | `false` | Allow Playwright chromium escalation for bot-walled sites |
+
+**Attribution**: the vendored dataset is CC BY-SA 4.0, (c) 2015-2026 Micah Hoffman and WhatsMyName contributors; see `data/wmn/ATTRIBUTION.md`. To refresh: re-download `wmn-data.json` from the source repository and update the date in that file. Public data only: the sweep never accesses private or authenticated content.
+
+### 7. LinkedIn Public Post Harvesting
+LinkedIn is invisible to exact-username sweeps (profiles use name-derived slugs like `gourish-julka-472a1632b`, not handles) and to reverse image engines (post photos are not indexed). But **public post pages** (`linkedin.com/posts/...`) are guest-accessible and expose:
+* the post's embedded images (feedshare photos) via `og:image` and the page DOM,
+* member profile photos (displayphoto URLs) present on the page,
+* associate profile slugs (`/in/kingsahil`, `/in/khannasparsh`, ...) for cross-platform identity pivots.
+
+FaceTrace harvests all of this in `--target` mode (`TargetURLProvider` detects `linkedin.com/posts/` URLs, plain requests with browser escalation as fallback), and the associate-forensics stage renders discovered post URLs to pull every embedded photo into the biometric pool.
+
+> [!IMPORTANT]
+> **Profile pages are intentionally out of scope.** `linkedin.com/in/...` serves HTTP 999 to scripts and redirects browsers to the authwall. The pipeline never authenticates, bypasses the login wall, or accesses private content: only guest-visible post pages are used.
 
 ---
 
