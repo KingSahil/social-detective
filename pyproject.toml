@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "social-detective"
 version = "1.0.0"
-description = "FaceTrace — Face Search + Blockchain Verification CLI"
+description = "Social Detective — Face Search + Blockchain Verification CLI"
 requires-python = ">=3.10"
 dependencies = [
     "insightface>=0.7.3",

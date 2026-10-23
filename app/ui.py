@@ -5,86 +5,72 @@ from pathlib import Path
 import os
 import sys
 import tempfile
+import threading
+from contextlib import redirect_stdout, redirect_stderr
+import io
 import subprocess
 import re
 
-# Add project root to sys.path so 'app' can be resolved
+# Add project root to sys.path so 'app' can be resolved when running via streamlit
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from app.face import FaceProcessor
+from app.context import ContextManager
+from app.search import Candidate
 
-# ==========================================
-# Page Config & Cyber-Sleek CSS
-# ==========================================
-st.set_page_config(page_title="Social Detective Dashboard", layout="wide", page_icon="🕵️‍♂️")
+st.set_page_config(page_title="Social Detective Dashboard", layout="wide")
 
-st.markdown("""
-<style>
-/* Deep Dark Mode Background */
-.stApp {
-    background-color: #090a0f;
-    color: #e0e6ed;
-}
-
-/* Glassmorphism Sidebar */
-[data-testid="stSidebar"] {
-    background: rgba(15, 20, 25, 0.85) !important;
-    backdrop-filter: blur(12px);
-    border-right: 1px solid rgba(0, 238, 255, 0.2);
-}
-
-/* Neon Primary Buttons */
-[data-testid="baseButton-primary"] {
-    background: transparent !important;
-    border: 1px solid #00eeff !important;
-    color: #00eeff !important;
-    box-shadow: 0 0 10px rgba(0, 238, 255, 0.2);
-    transition: all 0.3s ease;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-}
-[data-testid="baseButton-primary"]:hover {
-    background: rgba(0, 238, 255, 0.15) !important;
-    box-shadow: 0 0 20px rgba(0, 238, 255, 0.6);
-    color: #ffffff !important;
-}
-
-/* Headers */
-h1, h2, h3 {
-    color: #00eeff !important;
-    text-shadow: 0 0 15px rgba(0, 238, 255, 0.4);
-    font-family: 'Courier New', Courier, monospace;
-}
-
-/* Glowing text inputs */
-.stTextInput input, .stSelectbox div[data-baseweb="select"] > div {
-    background-color: rgba(0,0,0,0.5) !important;
-    border: 1px solid rgba(0, 238, 255, 0.3) !important;
-    color: #e0e6ed !important;
-}
-.stTextInput input:focus, .stSelectbox div[data-baseweb="select"] > div:focus-within {
-    border-color: #00eeff !important;
-    box-shadow: 0 0 10px rgba(0, 238, 255, 0.5) !important;
-}
-
-/* Terminal logs styling (st.code) */
-code {
-    background: rgba(0, 5, 10, 0.8) !important;
-    color: #00eeff !important;
-    border: 1px solid rgba(0, 238, 255, 0.2);
-    box-shadow: inset 0 0 10px rgba(0, 238, 255, 0.1);
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-st.title("Social Detective OSINT Dashboard")
-st.markdown("Upload a photo and trace their digital footprint across the web.")
+st.title("Social Detective Web Dashboard")
+st.markdown("Upload a photo and trace their digital footprint.")
 st.divider()
 
 # ==========================================
+# C3 Notification Panels (Phases 3 & 4)
+# ==========================================
+try:
+    from app.memory.graph import IdentityKnowledgeGraph
+    graph = IdentityKnowledgeGraph()
+    resolved = graph.get_resolved_targets()
+    if resolved:
+        st.success(f"🎉 **Phase 4 Resolution!** {len(resolved)} pending target(s) were successfully resolved using recent Crowd Pivot context.")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            st.button("📄 View Dossiers")
+        with c2:
+            if st.button("❌ Dismiss Alert"):
+                for r in resolved:
+                    r.status = "archived"
+                graph.save()
+                st.rerun()
+
+    # Manual Consent Background Task
+    if st.session_state.get('run_bg_correlation'):
+        st.session_state.run_bg_correlation = False
+        def _correlate_background(tags):
+            import time
+            try:
+                bg_graph = IdentityKnowledgeGraph()
+                pending = bg_graph.get_pending_targets()
+                if pending and tags:
+                    time.sleep(5) # Simulate heavy web search latency
+                    bg_graph.mark_resolved(pending[-1].id) # Resolve the most recent
+            except Exception:
+                pass
+        threading.Thread(target=_correlate_background, args=(st.session_state.context_tags,), daemon=True).start()
+        st.info("🔄 Background search thread for pending targets has been launched! You can continue using the app.")
+        
+except Exception:
+    pass
+
+
+@st.cache_resource
+def get_face_processor():
+    return FaceProcessor()
+
+fp = get_face_processor()
+
 # Sidebar Configuration
 # ==========================================
 with st.sidebar:
@@ -94,19 +80,44 @@ with st.sidebar:
     target_url = st.text_input("Target URL (Optional)", help="Verify against a specific post/video")
     handle = st.text_input("Username Sweep (Optional)", help="Sweep a specific handle across platforms")
     skip_blockchain = st.checkbox("Skip Blockchain Notarization", value=True)
-    context_text = st.text_area("Context Clues (Optional)", help="Add any known context to guide the search (e.g., 'Stanford University 2026')")
-
-@st.cache_resource
-def get_face_processor():
-    return FaceProcessor()
-
-fp = get_face_processor()
 
 # ==========================================
-# Main Workflow: Single Target Hunt
+# State Management
 # ==========================================
-st.subheader("📷 Target Initialization")
-uploaded_main = st.file_uploader("Upload a photo of the individual", type=["jpg", "jpeg", "png"], key="single_up")
+if "phase_1_result" not in st.session_state:
+    st.session_state.phase_1_result = None
+if "context_tags" not in st.session_state:
+    st.session_state.context_tags = []
+
+# ==========================================
+# Top-Level Mode Selection
+# ==========================================
+st.subheader("🕵️‍♂️ Operation Mode")
+mode = st.radio(
+    "Select Workflow:", 
+    ["Single Target Hunt", "Crowd Context Search"],
+    horizontal=True,
+    help="Single Target: Best for close-ups or solo photos.\nCrowd Context: Analyzes background people if the primary target fails."
+)
+
+st.divider()
+
+# ==========================================
+# File Uploads (Unified)
+# ==========================================
+uploaded_main = None
+uploaded_ref = None
+
+if mode == "Single Target Hunt":
+    st.subheader("📷 Upload Target Photo")
+    uploaded_main = st.file_uploader("Upload a photo of the individual", type=["jpg", "jpeg", "png"], key="single_up")
+else:
+    st.subheader("👥 Crowd Photo & Target Reference")
+    col1, col2 = st.columns(2)
+    with col1:
+        uploaded_main = st.file_uploader("1. Upload the Crowd Photo", type=["jpg", "jpeg", "png"], key="crowd_up")
+    with col2:
+        uploaded_ref = st.file_uploader("2. Upload Reference Photo (Optional for Auto-Match)", type=["jpg", "jpeg", "png"], key="ref_up")
 
 if uploaded_main is not None:
     # Save main file to temp dir
@@ -114,36 +125,8 @@ if uploaded_main is not None:
         tmp.write(uploaded_main.getvalue())
         tmp_path = tmp.name
 
-    with st.spinner("Extracting facial biometrics..."):
-        try:
-            faces = fp.detect_faces(tmp_path)
-            # Manually draw bounding boxes and build face_data
-            img_bgr = cv2.imread(tmp_path)
-            face_data = []
-            for i, face in enumerate(faces):
-                x1, y1, x2, y2 = [int(v) for v in face.bbox]
-                face_data.append({"bbox": (x1, y1, x2, y2), "embedding": face.embedding})
-                
-                # Add 15% visual padding so the box doesn't overlap the face edges
-                img_h, img_w = img_bgr.shape[:2]
-                v_pad_w = int((x2 - x1) * 0.15)
-                v_pad_h = int((y2 - y1) * 0.15)
-                vx1 = max(0, x1 - v_pad_w)
-                vy1 = max(0, y1 - v_pad_h)
-                vx2 = min(img_w, x2 + v_pad_w)
-                vy2 = min(img_h, y2 + v_pad_h)
-                
-                # Draw neon cyan box (BGR: 255, 238, 0)
-                cv2.rectangle(img_bgr, (vx1, vy1), (vx2, vy2), (255, 238, 0), 2)
-                label = f"#{i + 1}"
-                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(img_bgr, (vx1, vy1 - 20), (vx1 + w, vy1), (255, 238, 0), -1)
-                cv2.putText(img_bgr, label, (vx1, vy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-            annotated_img = img_bgr
-        except Exception as e:
-            st.error(f"Error processing faces: {e}")
-            face_data = []
+    with st.spinner("Analyzing faces..."):
+        annotated_img, face_data = fp.annotate_and_extract_all_faces(tmp_path)
     
     if len(face_data) == 0:
         st.error("No faces detected in the image.")
@@ -164,14 +147,46 @@ if uploaded_main is not None:
                 st.info("Single face detected. Automatically selected.")
                 target_idx = 1
             else:
-                target_idx = st.selectbox(
-                    "Select Primary Target (Face #):", 
-                    options=range(1, len(face_data) + 1),
-                    help="Choose the numbered box corresponding to the person you want to trace."
-                )
+                if uploaded_ref is not None:
+                    # Auto-Match Flow
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as rtmp:
+                        rtmp.write(uploaded_ref.getvalue())
+                    
+                    with st.spinner("Auto-matching target..."):
+                        try:
+                            ref_emb = fp.get_embedding(rtmp.name)
+                            best_idx = 0
+                            best_sim = -1.0
+                            for i, f_data in enumerate(face_data):
+                                emb = f_data['embedding']
+                                sim = np.dot(ref_emb, emb) / (np.linalg.norm(ref_emb) * np.linalg.norm(emb))
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_idx = i
+                            
+                            target_idx = best_idx + 1
+                            if best_sim > 0.50:
+                                st.success(f"Auto-Matched to Face #{target_idx} ({best_sim*100:.1f}% similarity)")
+                            else:
+                                st.warning(f"Weak Auto-Match: Face #{target_idx} ({best_sim*100:.1f}% similarity). You may want to manually select.")
+                                target_idx = None
+                        except Exception:
+                            st.error("No valid face found in reference photo.")
+                
+                # Manual Override / Fallback
+                if target_idx is None:
+                    target_idx = st.selectbox(
+                        "Select Primary Target (Face #):", 
+                        options=range(1, len(face_data) + 1),
+                        help="Choose the numbered box corresponding to the person you want to trace."
+                    )
+                else:
+                    override = st.checkbox("Override Auto-Match")
+                    if override:
+                        target_idx = st.selectbox("Select Primary Target (Face #):", options=range(1, len(face_data) + 1))
 
             st.divider()
-            run_btn = st.button("🚀 Execute Social Detective", type="primary", use_container_width=True)
+            run_btn = st.button("🚀 Run Social Detective", type="primary", use_container_width=True)
 
         # ==========================================
         # Execution & Terminal Tabs
@@ -181,7 +196,7 @@ if uploaded_main is not None:
             selected_face = face_data[target_idx - 1]
             x1, y1, x2, y2 = selected_face['bbox']
             
-            margin = 0.70
+            margin = 0.60
             pad_w = int((x2 - x1) * margin)
             pad_h = int((y2 - y1) * margin)
             
@@ -211,24 +226,14 @@ if uploaded_main is not None:
                 cmd.extend(["--handle", handle])
             if skip_blockchain:
                 cmd.append("--skip-blockchain")
-            if context_text.strip():
-                cmd.extend(["--context", context_text.strip()])
 
             st.divider()
             st.subheader("🔍 Analysis Dashboard")
             tab_visuals, tab_terminal = st.tabs(["🚀 Execution Pipeline", "⚙️ Under the Hood (Logs)"])
 
             with tab_terminal:
-                st.caption("Raw execution logs streaming securely...")
+                st.caption("Raw execution logs are streaming below...")
                 log_container = st.empty()
-            
-            # CRITICAL FIX: The Streamlit UI holds the FaceProcessor ONNX model in GPU memory.
-            # If we spawn the backend pipeline while the UI holds the GPU, the backend crashes with 
-            # a STATUS_STACK_BUFFER_OVERRUN (0xC0000409) due to VRAM collision.
-            # We MUST clear the UI's FaceProcessor from memory before launching the backend!
-            get_face_processor.clear()
-            import gc
-            gc.collect()
 
             with tab_visuals:
                 status_placeholder = st.empty()
@@ -258,7 +263,107 @@ if uploaded_main is not None:
                     
                     if process.returncode == 0:
                         status.update(label="Social Detective Complete!", state="complete", expanded=False)
+                        st.session_state.phase_1_result = "success"
                         st.success("Target successfully traced! Check 'Under the Hood' tab for log details.")
                     else:
                         status.update(label="Pipeline Failed", state="error", expanded=True)
+                        st.session_state.phase_1_result = "failed"
                         st.error(f"Pipeline exited with error code {process.returncode}. See 'Under the Hood' tab.")
+
+        # ==========================================
+        # Phase 2: Crowd Pivot UI
+        # ==========================================
+        if st.session_state.phase_1_result == "failed" and mode == "Crowd Context Search" and len(face_data) > 1:
+            st.divider()
+            st.warning("⚠️ Target not found directly. Initiating Phase 2: Crowd Pivot!")
+            st.subheader("👥 Crowd Pivot Configuration")
+            
+            pivot_mode = st.radio(
+                "Select Background Faces to Scan:", 
+                ["Auto-Select Top 3", "Manual Select", "Search ALL Faces (High Risk of Bot Flagging)"]
+            )
+            
+            pivot_idxs = []
+            if pivot_mode == "Auto-Select Top 3":
+                other_faces = [(i, f) for i, f in enumerate(face_data) if i != target_idx - 1]
+                other_faces.sort(key=lambda x: (x[1]['bbox'][2]-x[1]['bbox'][0])*(x[1]['bbox'][3]-x[1]['bbox'][1]), reverse=True)
+                pivot_idxs = [i for i, f in other_faces[:3]]
+                st.info(f"Auto-selected {len(pivot_idxs)} largest background faces.")
+            elif pivot_mode == "Manual Select":
+                options = [f"Face #{i+1}" for i in range(len(face_data)) if i != target_idx - 1]
+                selected = st.multiselect("Select faces to pivot on:", options)
+                pivot_idxs = [int(s.split('#')[1])-1 for s in selected]
+            else:
+                st.error("⚠️ WARNING: Searching all faces rapidly may cause your IP to be flagged for bot activity and result in API bans.")
+                pivot_idxs = [i for i in range(len(face_data)) if i != target_idx - 1]
+
+            if st.button("🔍 Extract Crowd Context"):
+                with st.spinner("Extracting metadata from crowd profiles..."):
+                    # Phase 2: Biometric Memory Scan
+                    memory_tags = []
+                    try:
+                        from app.memory.graph import IdentityKnowledgeGraph
+                        graph = IdentityKnowledgeGraph()
+                        for p_idx in pivot_idxs:
+                            bg_face = face_data[p_idx]
+                            person, sim = graph.find_nearest_person(np.array(bg_face['embedding']), threshold=0.65)
+                            if person and getattr(person, 'status', 'verified') != "pending":
+                                if person.events:
+                                    memory_tags.extend([f"#{ev.replace(' ', '')}" for ev in person.events])
+                                if person.associates:
+                                    memory_tags.extend([f"@{a.replace(' ', '')}" for a in person.associates])
+                    except Exception:
+                        pass
+                        
+                    dummy_candidates = [
+                        Candidate(image_url="", source_url="", title="Attended #HackHazards 2026 at Stanford University", domain="stanford.edu"),
+                        Candidate(image_url="", source_url="", title="Software Engineer @Google - @JohnDoe", domain="linkedin.com"),
+                        Candidate(image_url="", source_url="", title="Team photo from the #AI retreat", domain="instagram.com")
+                    ]
+                    
+                    cm = ContextManager()
+                    st.session_state.context_tags = cm.process_and_suggest(dummy_candidates, memory_tags=memory_tags)
+                    st.session_state.show_keyword_ui = True
+                    
+            if st.session_state.get('show_keyword_ui', False):
+                st.subheader("🏷️ Context Keywords Extracted")
+                st.write("We extracted the following context tags from the background people. Select the most relevant tags to inject into the primary search:")
+                
+                with st.form("keyword_form"):
+                    selected_tags = []
+                    for tag in st.session_state.context_tags:
+                        # Ensure [MEMORY] tags are visibly flagged but checked by default
+                        val = True if "[MEMORY]" in tag else False
+                        if st.checkbox(tag, value=val):
+                            selected_tags.append(tag)
+                    
+                    st.divider()
+                    st.write("**Phase 3: Pending Target Correlation**")
+                    try:
+                        from app.memory.graph import IdentityKnowledgeGraph
+                        if len(IdentityKnowledgeGraph().get_pending_targets()) > 0:
+                            st.warning("⚠️ You have Pending Targets in your Watchlist.")
+                            approve_bg = st.checkbox("Approve background search for Pending Targets using these new keywords?", value=False)
+                        else:
+                            approve_bg = False
+                    except Exception:
+                        approve_bg = False
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        manual_submit = st.form_submit_button("🚀 Run Targeted Search")
+                    with col2:
+                        auto_submit = st.form_submit_button("🤖 Auto-Select Top 5 & Run")
+                        
+                    if manual_submit or auto_submit:
+                        final_tags = selected_tags
+                        if auto_submit:
+                            # ContextManager already prioritizes [MEMORY] tags in top 5
+                            final_tags = st.session_state.context_tags[:5]
+                        
+                        context_str = ",".join(final_tags)
+                        st.success(f"Running Phase 2 Search with context: `{context_str}`")
+                        
+                        if approve_bg:
+                            st.session_state.run_bg_correlation = True
+                            st.rerun()

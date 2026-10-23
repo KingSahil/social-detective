@@ -1,6 +1,6 @@
 <div align="center">
 
-# FaceTrace (SocialDetective)
+# Social Detective (SocialDetective)
 
 ### Autonomous Biometric OSINT Facial Recognition, Decentralized Web3 Knowledge Graph & Immutable Blockchain Notarization
 
@@ -14,6 +14,7 @@
 [![Web3.py](https://img.shields.io/badge/Web3-Web3.py-F16822?style=for-the-badge&logo=ethereum&logoColor=white)](https://web3py.readthedocs.io)
 
 [![SerpAPI Google Lens](https://img.shields.io/badge/Search-SerpAPI%20Google%20Lens-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://serpapi.com)
+[![Streamlit UI](https://img.shields.io/badge/Dashboard-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
 [![Yandex Images](https://img.shields.io/badge/Visual%20Search-Yandex%20Images-FC3F1D?style=for-the-badge&logo=yandex&logoColor=white)](https://yandex.com/images)
 [![DuckDuckGo](https://img.shields.io/badge/Fallback-DuckDuckGo%20Search-DE5833?style=for-the-badge&logo=duckduckgo&logoColor=white)](https://duckduckgo.com)
 [![Instagram](https://img.shields.io/badge/OSINT-Instagram%20Reels%20%26%20Carousels-E4405F?style=for-the-badge&logo=instagram&logoColor=white)](https://instagram.com)
@@ -77,7 +78,7 @@
 
 Commercial facial search engines hoard indexed identity associations behind expensive subscription paywalls and proprietary servers. When an investigator uncovers evidence, traditional platforms offer no mathematical guarantee that scraped posts, timestamps, or media haven't been retroactively manipulated.
 
-**FaceTrace (SocialDetective)** resolves both challenges:
+**Social Detective (SocialDetective)** resolves both challenges:
 
 1. **Free, Decentralized Collective Intelligence**: Transforms forensic identity discovery into an open, community-indexed knowledge graph. Findings are packaged into deterministic IPFS payloads (`bafkrei...`) and synchronized across participants via Ethereum Sepolia event logs (`--sync-web3`). Zero central servers or proprietary database lock-ins.
 2. **Cryptographic Proof of Authenticity**: Packages acquired posts into canonical, key-sorted RFC-compliant payloads, computes a 32-byte SHA-256 fingerprint, and permanently seals the evidence on Ethereum Sepolia via a dedicated Solidity smart contract.
@@ -92,10 +93,11 @@ Commercial facial search engines hoard indexed identity associations behind expe
 | **Biometric Face Intake** | **InsightFace** (`buffalo_l` model pack) generating normalized **512-d ArcFace embeddings**. | Pose-invariant ($\pm 45^\circ$), illumination-resistant geometric representations for high-precision face matching. |
 | **Zero-CAPTCHA Visual Search** | Multi-engine cascade: **SerpAPI Google Lens** $\rightarrow$ **Offscreen Headless Lens** $\rightarrow$ **Direct Yandex Images**. | Bypasses Google bot challenges via raw multipart `/v3/upload` dispatches and offscreen session rendering. |
 | **Decentralized Collective Memory** | Shared **Identity Knowledge Graph** backed by **IPFS CIDv1** and **Sepolia Contract Event Sync** (`--sync-web3`). | Eliminates centralized backends. Any researcher can sync, query, and enrich the shared biometric graph. |
+| **Crowd-Context Search (C3)** | Asynchronous Watchlist indexing, background face extraction, and Memory Tag prioritization (`[MEMORY]`). | Salvages dead-end searches by tracking pending targets and resolving them via metadata scraped from background faces in subsequent crowds. |
 | **Multimodal Scene & GEOINT** | Contextual terrain, architectural, and environmental feature estimation via `app/geo.py`. | Extracts background features and lighting clues to assist physical geolocation hypotheses. |
 | **Deterministic Hashing** | RFC-compliant canonical key-sorted JSON packaging + **32-byte SHA-256 fingerprint**. | Guarantees mathematical immutability and byte-level integrity verification across environments. |
-| **Immutable Notarization** | **`ContentRegistry.sol` (Solidity 0.8.19)** deployed on **Ethereum Sepolia Testnet** with IPFS CID anchoring. | Permanent, decentralized timestamping and provenance proof without storing private biometric data on-chain. |
-| **Independent Verification** | Standalone verification CLI (`facetrace verify --record <path>`) querying Sepolia contract state. | Immediate tamper alert (`✗ TAMPER DETECTED`) if any text, author, URL, or image pixel was altered post-registration. |
+| **Immutable Notarization** | **`ContentRegistry.sol` (Solidity 0.8.19)** deployed on **Ethereum Sepolia Testnet** with IPFS CID anchoring. | Permanent, decentralized timestamping and delayed-discovery provenance proofs without storing private biometric data on-chain. |
+| **Independent Verification** | Standalone verification CLI (`social-detective verify --record <path>`) querying Sepolia contract state. | Immediate tamper alert (`✗ TAMPER DETECTED`) if any text, author, URL, or image pixel was altered post-registration. |
 
 ---
 
@@ -109,7 +111,7 @@ Commercial facial search engines hoard indexed identity associations behind expe
            │
            ▼
   [3] MULTI-ENGINE SEARCH     SerpAPI Google Lens ➔ Headless Zero-CAPTCHA Lens ➔ Yandex ➔ Social Sweeps
-           │
+           │                    (If Failed ➔ Ingest to Watchlist & Trigger Crowd Context Pivot)
            ▼
   [4] BIOMETRIC MATCHING      Candidate face extraction ➔ Cosine similarity ranking (e.g. 97.5% match)
            │
@@ -118,7 +120,7 @@ Commercial facial search engines hoard indexed identity associations behind expe
            │
            ▼
   [6] BLOCKCHAIN ANCHORING    Sign Sepolia tx ➔ Anchor contentHash & platform|ipfs://<cid> in ContentRegistry.sol
-           │
+           │                    (Supports Delayed Discovery timeline if resolved from Watchlist)
            ▼
   [7] AUDIT & VERIFICATION    Independent verification check: Local Digest == On-Chain Digest
 ```
@@ -135,6 +137,7 @@ Commercial facial search engines hoard indexed identity associations behind expe
 
 - **Phase 3 — Dynamic Multi-Engine Visual Search Cascade**:
   Dispatches reverse image searches across SerpAPI Google Lens, Headless Stealth Google Lens, Yandex Images, Instagram Reels/Carousels, X/Twitter, and LinkedIn.
+  *Note: If search yields 0 candidates, the target is ingested into the **C3 Watchlist** as "pending". A **Crowd Pivot** can then extract context tags from background faces to rescue the search.*
 
 - **Phase 4 — Biometric Matching & Ranking**:
   Harvests candidate images, locates candidate faces, extracts ArcFace embeddings, computes cosine similarity scores ($S_C = \frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\|_2 \|\mathbf{v}\|_2}$), and identifies the top match exceeding the threshold.
@@ -143,7 +146,7 @@ Commercial facial search engines hoard indexed identity associations behind expe
   Gathers author information, post text, and media bytes into an RFC-compliant canonical JSON payload. Computes a deterministic IPFS CIDv1 (`bafkrei...`) and a 32-byte SHA-256 digest (`bytes32`).
 
 - **Phase 6 — Blockchain Notarization & Memory Consolidation**:
-  Submits an Ethereum Sepolia transaction invoking `registerRecord(contentHash, "platform|ipfs://<cid>")` on `ContentRegistry.sol`, then records the transaction receipt in the local forensic dossier and knowledge graph.
+  Submits an Ethereum Sepolia transaction invoking `registerRecord(contentHash, "platform|ipfs://<cid>")` on `ContentRegistry.sol`, then records the transaction receipt in the local forensic dossier and knowledge graph. If the target was resolved from the Watchlist, the timeline (`initial_timestamp->resolved_timestamp`) is immutably anchored.
 
 - **Phase 7 — Independent Verification Audit**:
   Re-computes the canonical hash from local files, queries the Sepolia smart contract, and validates authenticity (`✓ CONTENT VERIFIED` or `✗ TAMPER DETECTED`).
@@ -152,7 +155,7 @@ Commercial facial search engines hoard indexed identity associations behind expe
 
 ## Decentralized Web3 Collective Memory
 
-Traditional facial recognition platforms maintain centralized, proprietary databases. FaceTrace uses a decentralized peer-to-peer memory model where verified findings are shared openly without vendor lock-in.
+Traditional facial recognition platforms maintain centralized, proprietary databases. Social Detective uses a decentralized peer-to-peer memory model where verified findings are shared openly without vendor lock-in.
 
 <br/>
 
@@ -210,8 +213,11 @@ Traditional facial recognition platforms maintain centralized, proprietary datab
    ```
    The syncer inspects `ContentRegistry.sol` on Sepolia using 9,000-block paginated RPC requests (respecting provider rate limits), discovers new IPFS CIDs, pulls the payloads through public IPFS gateways (Cloudflare, IPFS.io, dweb.link), and merges them into the local knowledge graph (`data/memory/knowledge_graph.json`).
 
+4. **Continuous Context Correlation (C3)**:
+   The Web3 Memory Graph acts as the backbone for the C3 engine. If you scan a crowd photo and a background face matches a highly-verified identity in your Graph, the system automatically pulls their historical `@handles` and `#events`, labeling them as `[MEMORY]` tags to drastically boost the accuracy of your searches.
+
 > [!TIP]
-> **Zero Centralized Backend**: There are no proprietary database servers to maintain or pay for. Every researcher running FaceTrace contributes to and benefits from a shared, cryptographically verifiable forensic collective memory.
+> **Zero Centralized Backend**: There are no proprietary database servers to maintain or pay for. Every researcher running Social Detective contributes to and benefits from a shared, cryptographically verifiable forensic collective memory.
 
 ---
 
@@ -307,7 +313,7 @@ flowchart TD
 
     subgraph P7 ["Phase 7: Independent Audit & Tamper Detection"]
         direction TB
-        V_AUDIT["Audit Engine (facetrace verify)<br/>Recompute Canonical SHA-256 Hash"]:::verifyNode
+        V_AUDIT["Audit Engine (social-detective verify)<br/>Recompute Canonical SHA-256 Hash"]:::verifyNode
         V_CHECK{"Integrity Check:<br/>Local == On-Chain?"}:::verifyNode
         V_PASS(["✓ CONTENT VERIFIED<br/>100% Authentic & Untampered"]):::passNode
         V_FAIL(["✗ TAMPER DETECTED<br/>Content or Metadata Altered"]):::failNode
@@ -344,7 +350,7 @@ flowchart TD
 
 ### 2. Multi-Engine Visual Search & Zero-CAPTCHA Architecture
 
-FaceTrace implements a resilient multi-tier fallback cascade to ensure uninterrupted reverse visual discovery:
+Social Detective implements a resilient multi-tier fallback cascade to ensure uninterrupted reverse visual discovery:
 
 ```
   SerpAPI Google Lens  ──(Quota/429)──►  HeadlessLensProvider  ──(Fail)──►  DirectYandexProvider
@@ -355,7 +361,7 @@ FaceTrace implements a resilient multi-tier fallback cascade to ensure uninterru
 #### The Zero-CAPTCHA Breakthrough (`HeadlessLensProvider`)
 
 - **The Bot Wall**: Automating standard browser uploads directly through `lens.google.com` instantly triggers Enterprise Google reCAPTCHA grids and `sorry/index` rate-limit screens.
-- **Direct Backend Upload**: FaceTrace bypasses browser upload forms by submitting raw image multipart payloads directly to Google's backend visual ingestion endpoint:
+- **Direct Backend Upload**: Social Detective bypasses browser upload forms by submitting raw image multipart payloads directly to Google's backend visual ingestion endpoint:
   ```text
   POST https://lens.google.com/v3/upload
   ```
@@ -365,7 +371,7 @@ FaceTrace implements a resilient multi-tier fallback cascade to ensure uninterru
 
 #### Tertiary Fallback (`DirectYandexProvider`)
 
-If Google Lens endpoints are unreachable or severely throttled, FaceTrace automatically redirects cropped facial queries to Yandex Visual Search, ensuring multi-jurisdiction index coverage.
+If Google Lens endpoints are unreachable or severely throttled, Social Detective automatically redirects cropped facial queries to Yandex Visual Search, ensuring multi-jurisdiction index coverage.
 
 <br/>
 
@@ -404,7 +410,7 @@ Inspects suspected creator accounts across platforms without manual scraping:
 
 ### 6. Cross-Platform Username Sweeps (WhatsMyName)
 
-When reverse visual search yields no strong matches, FaceTrace pivots to **identity search**:
+When reverse visual search yields no strong matches, Social Detective pivots to **identity search**:
 
 - **716-Site Dataset**: Evaluates target handles against the community-curated [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) database (vendored at `data/wmn/`, CC BY-SA 4.0).
 - **Strict Evidence Verification**: An account hit requires dual confirmation (`e_code` HTTP status + `e_string` response validation). Soft-404s and login redirects are classified as misses.
@@ -438,7 +444,7 @@ LinkedIn profiles rely on name slugs rather than standard handles and are shield
 - **Associate Tag Pivots**: Discovers mentioned member profile slugs (`/in/kingsahil`, `/in/khannasparsh`) to seed further cross-platform queries.
 
 > [!IMPORTANT]
-> **Strict Public-Only Scope**: FaceTrace never attempts to bypass login screens or access private profile pages. Only guest-visible public post content is harvested.
+> **Strict Public-Only Scope**: Social Detective never attempts to bypass login screens or access private profile pages. Only guest-visible public post content is harvested.
 
 <br/>
 
@@ -449,13 +455,70 @@ Implemented in `app/geo.py`, this module analyzes query images for environmental
 - Lighting conditions and sun elevation hints.
 - Contextual tags to assist human analysts in formulating geolocation hypotheses.
 
+<br/>
+
+### 9. Continuous Context Correlation (C3) & Crowd Context Engine
+
+A completely novel architectural foundation, C3 rescues searches that would traditionally fail and hit a dead-end.
+
+**The Crowd Context Engine:**
+When a primary target cannot be found visually, investigators can pivot to searching the **background crowd** within the same photo. 
+- The engine identifies all background faces, ranks them by size, and extracts contextual footprints (e.g. `#StanfordUniversity`, `@JohnDoe`) from their public posts.
+- A dedicated `ContextManager` filters out stop words, heavily scores domains and hashtags, and presents the top highly-potent keywords to inject into the primary search.
+
+**The C3 4-Phase Lifecycle:**
+1. **Watchlist Ingestion**: If Target A yields 0 candidates, they are ingested into the `IdentityKnowledgeGraph` as a `"pending"` target.
+2. **Biometric Memory Scan**: When a new Crowd Pivot occurs on Target B, the system scans the background faces against the Watchlist and Graph Memory. Valid historical metadata is injected into the context engine with extreme priority (`[MEMORY]`).
+3. **Manual Consent Background Search**: The Streamlit Dashboard dynamically detects pending targets and asks for consent before spinning up an asynchronous, non-blocking Python background thread to hunt for Target A using the newly discovered context from Target B.
+4. **Resolution & Delayed Discovery Notarization**: If the background thread finds Target A, the UI alerts the user, and the blockchain is updated with an immutable `initial_timestamp->resolved_timestamp` delay payload!
+
+#### Crowd Context Extraction Diagram
+```mermaid
+sequenceDiagram
+    participant UI as Streamlit UI
+    participant P as Pipeline (Phase 2)
+    participant AF as ArcFace Model
+    participant CM as ContextManager
+    participant L as SerpAPI Lens
+    
+    UI->>P: Target B (Crowd Pivot)
+    P->>AF: Extract Background Faces
+    AF-->>P: Ranked Faces (by Size)
+    P->>L: Visual Search Background Faces
+    L-->>P: Scraped Meta, Titles & URLs
+    P->>CM: Feed Raw Metadata
+    CM->>CM: NLP Stop Word Stripping
+    CM->>CM: Score #Hashtags & @Domains
+    CM-->>UI: Top 5 Potent Keywords
+    UI->>L: Inject Keywords into Target A Search
+```
+
+#### C3 Lifecycle Flowchart
+```mermaid
+flowchart TD
+    classDef pending fill:#b91c1c,stroke:#f87171,color:#ffffff,stroke-width:2px
+    classDef pivot fill:#0284c7,stroke:#38bdf8,color:#ffffff,stroke-width:2px
+    classDef memory fill:#047857,stroke:#34d399,color:#ffffff,stroke-width:2px
+    classDef ui fill:#7e22ce,stroke:#c084fc,color:#ffffff,stroke-width:2px
+    classDef chain fill:#c2410c,stroke:#fb923c,color:#ffffff,stroke-width:2px
+
+    A[Target A: Primary Search Fails]:::pending --> B(Watchlist: Ingest as 'Pending')
+    B --> C[Target B: Crowd Pivot Initiated]:::pivot
+    C --> D{Biometric Memory Scan}
+    D -->|Background Face Matches Watchlist| E[Pull Historical Meta as MEMORY Tag]:::memory
+    E --> F[Dashboard: Prompt Manual Consent]:::ui
+    F -->|Consent Granted| G(Async Background Thread Hunts Target A)
+    G -->|Target Found| H[Update Status: Resolved]
+    H --> I[Ethereum: Delayed Discovery Notarization]:::chain
+```
+
 ---
 
 ## Blockchain Architecture: Ethereum Sepolia
 
 ### Network Selected: **Ethereum Sepolia Testnet** (Chain ID: `11155111`)
 
-FaceTrace anchors forensic records to **Ethereum Sepolia**, the primary Proof-of-Stake public testnet supported by the Ethereum Foundation.
+Social Detective anchors forensic records to **Ethereum Sepolia**, the primary Proof-of-Stake public testnet supported by the Ethereum Foundation.
 
 ```
                     ┌────────────────────────┐
@@ -663,7 +726,16 @@ This will open a local web server (usually at `http://localhost:8501`). From the
 
 ### 6. CLI Execution Workflows
 
-#### Option A: Autonomous Reverse Visual Search (Default)
+#### Option A: Streamlit Web Dashboard (Highly Recommended)
+Launch the modern, responsive Web UI to access both the Single Target Hunt and the full Crowd Context Search (C3) capabilities:
+```bash
+streamlit run app/ui.py
+```
+*Note: The C3 asynchronous background correlation thread is only available via the Streamlit UI.*
+
+<br/>
+
+#### Option B: Autonomous Reverse Visual Search (CLI)
 Queries Google Lens via SerpAPI. If quota is exhausted (HTTP 429), automatically activates the Zero-CAPTCHA Headless Lens Provider and Yandex fallback, extracts matches, notarizes on Sepolia, and verifies on-chain:
 ```bash
 python -m app.main --image ./data/input/test_face_10.jpg
@@ -736,15 +808,14 @@ python -m app.memory.migrate
 
 <br/>
 
-#### Option H: Group Photos & Multi-Face Targeting (`--face-index`)
-When an input image contains multiple faces (group photos, stage pictures, selfies), FaceTrace automatically detects and indexes all faces, defaulting to the primary (largest) face, or allows targeting any person by index:
+#### Option H: Group Photos & Interactive Crowd Pivot
+When an input image contains multiple faces (group photos, stage pictures, selfies), the CLI automatically launches an **Interactive Visual TUI**. It draws bounding boxes over all detected faces, automatically opens the annotated image on your screen, and pauses the terminal to ask you which face index to target:
 ```bash
-# Auto-detects all faces and defaults to primary/largest face #0
 python -m app.main --image ./data/input/test_face_23.jpg
-
-# Explicitly target face #1 in a group photo
-python -m app.main --image ./data/input/test_face_23.jpg --face-index 1
 ```
+*Tip: You can bypass the interactive prompt by explicitly targeting a face: `python -m app.main --image ./data/input/test_face_23.jpg --face-index 1`*
+
+**Crowd Pivot TUI:** If the primary search yields 0 candidates, the CLI will intercept the failure and interactively ask if you'd like to perform a **Crowd Pivot**. It will automatically extract background metadata and allow you to inject `[MEMORY]` keywords into a synchronous rescue search!
 
 ---
 
@@ -752,7 +823,7 @@ python -m app.main --image ./data/input/test_face_23.jpg --face-index 1
 
 ### 1. Re-Verifying a Recorded Dossier Against Ethereum Sepolia
 
-Once evidence is notarized, FaceTrace stores the complete forensic JSON dossier in `data/results/`. Anyone can independently audit this record at any future date:
+Once evidence is notarized, Social Detective stores the complete forensic JSON dossier in `data/results/`. Anyone can independently audit this record at any future date:
 
 ```bash
 python -m app.main verify --record ./data/results/20260904_064037_record.json
@@ -784,7 +855,7 @@ python -m app.main verify --record ./data/results/20260904_064037_record.json
 
 ### 2. Live Interactive Tamper Detection Demonstration
 
-FaceTrace guarantees that if any party modifies a post caption, replaces an image, or alters metadata, the cryptographic integrity check fails instantly.
+Social Detective guarantees that if any party modifies a post caption, replaces an image, or alters metadata, the cryptographic integrity check fails instantly.
 
 <br/>
 
@@ -835,10 +906,11 @@ In the interest of forensic transparency, the following technical constraints ar
 
 1. **Platform Rate Limits & Anti-Bot Mitigations**:
    - Search engines and social platforms enforce rate limits and bot challenges (Cloudflare Turnstile, reCAPTCHA v2/v3, HTTP 429).
-   - *FaceTrace Mitigation*: Multi-tier fallbacks (SerpAPI $\rightarrow$ Headless stealth browser $\rightarrow$ Direct Yandex $\rightarrow$ DuckDuckGo). Rapid sustained queries from a single residential IP may encounter temporary cooldowns without proxy rotation.
+   - *Social Detective Mitigation*: Multi-tier fallbacks (SerpAPI $\rightarrow$ Headless stealth browser $\rightarrow$ Direct Yandex $\rightarrow$ DuckDuckGo). Rapid sustained queries from a single residential IP may encounter temporary cooldowns without proxy rotation.
+   - *Crowd Context Warning*: Scanning multiple or all background faces rapidly during a Crowd Pivot causes intense bursts of bot activity and will very likely trigger API bans/throttling. It is recommended to use the "Auto-Select Top 3" filter.
 
 2. **Walled Gardens & Authenticated Content**:
-   - FaceTrace indexes only **publicly accessible posts, reels, and profiles**.
+   - Social Detective indexes only **publicly accessible posts, reels, and profiles**.
    - Content behind private profiles, restricted groups, or ephemeral formats (24h Stories) cannot be indexed without active user authentication cookies.
 
 3. **Biometric Variance Under Extreme Pose & Occlusion**:
@@ -846,11 +918,14 @@ In the interest of forensic transparency, the following technical constraints ar
    - Extreme angles ($>60^\circ$), heavy occlusions (dark glasses, medical masks), severe motion blur, or low-resolution crops ($<60\times 60$ px) reduce landmark detection confidence. Using `--threshold 0.50` or a tighter crop is recommended for challenging inputs.
 
 4. **Blockchain Testnet Latency**:
-   - Ethereum Sepolia has an average block time of ~12 seconds. Free RPC providers may experience temporary congestion. FaceTrace incorporates dynamic gas buffers (+25%) and polls transaction receipts for up to 120 seconds.
+   - Ethereum Sepolia has an average block time of ~12 seconds. Free RPC providers may experience temporary congestion. Social Detective incorporates dynamic gas buffers (+25%) and polls transaction receipts for up to 120 seconds.
 
 5. **Probabilistic Biometrics vs. Cryptographic Immutability**:
    - **Facial similarity is a statistical score, not legal identity proof.** A 97.5% ArcFace score confirms strong geometric similarity, but cannot differentiate identical twins or advanced 3D masks.
    - Blockchain notarization proves **content authenticity and timestamped existence**, certifying that the exact digital payload existed in that format at that block height.
+
+6. **Continuous Context Correlation (C3) Execution Limits**:
+   - The C3 background hunting thread operates entirely within the memory space of the Python execution context. A dedicated OS-level system daemon has not been implemented yet. Therefore, the Streamlit Dashboard (`app/ui.py`) MUST remain open for background tracking to operate.
 
 ---
 
@@ -894,14 +969,16 @@ Follow these steps to conduct an end-to-end demonstration or forensic audit:
 social-detective/
 ├── app/
 │   ├── __init__.py          # Module initialization
-│   ├── main.py              # CLI entry point and 7-phase pipeline orchestrator
+│   ├── main.py              # Modular entry point mapping CLI subcommands to core engines
+│   ├── ui.py                # Streamlit Web Dashboard orchestrating C3 and interactive OSINT
 │   ├── config.py            # Environment configuration and validation
 │   ├── face.py              # InsightFace ArcFace detection and 512-d embedding engine
 │   ├── search.py            # Search providers (SerpAPI, Headless Lens, Yandex, IG, X)
+│   ├── context.py           # ContextManager for parsing, scoring, and `[MEMORY]` tagging
 │   ├── matcher.py           # Cosine similarity ranking and candidate matching
 │   ├── content.py           # Content retrieval, author capture, and canonicalization
 │   ├── hashing.py           # Cryptographic SHA-256 fingerprint generator
-│   ├── blockchain.py        # Web3.py client for Solidity contract interaction
+│   ├── blockchain.py        # Web3.py client with Delayed Discovery payload support
 │   ├── verify.py            # Standalone integrity and blockchain verification logic
 │   ├── geo.py               # Multimodal GEOINT and environmental scene analysis
 │   ├── harvest.py           # Account imagery harvesting & avatar extraction
@@ -910,7 +987,7 @@ social-detective/
 │   └── memory/              # Decentralized Web3 Memory & Knowledge Graph
 │       ├── __init__.py      # Memory module initialization
 │       ├── ipfs.py          # Deterministic CIDv1 calculation & public IPFS resolution
-│       ├── graph.py         # IdentityKnowledgeGraph vector index & entity relations
+│       ├── graph.py         # IdentityKnowledgeGraph (incorporating Pending Watchlist logic)
 │       ├── web3_sync.py     # On-chain Sepolia event scanner & IPFS synchronizer
 │       └── migrate.py       # Ingestion tool for historic forensic records
 ├── contracts/
@@ -947,7 +1024,7 @@ social-detective/
 
 ## Testing & Performance Validation
 
-FaceTrace includes a comprehensive unit test suite covering all modules without requiring active API keys or live blockchain transactions:
+Social Detective includes a comprehensive unit test suite covering all modules without requiring active API keys or live blockchain transactions:
 
 ```bash
 pytest
@@ -1024,6 +1101,14 @@ EOF
 > [!WARNING]
 > **Zero biometric data is stored on-chain.**
 > Biometric vectors, facial crops, and private identity files are never broadcast to the blockchain. Only the irreversible SHA-256 cryptographic digest of the public post content is permanently recorded.
+
+<br/>
+
+> [!CAUTION]
+> **Ethical Considerations for Crowd-Context Pivoting**:
+> The Crowd-Context Search engine extracts OSINT metadata from individuals in the background of a photograph to aid in locating the primary subject. 
+> - Background individuals are treated strictly as secondary OSINT conduits.
+> - Their biometric profiles are cross-checked locally against the `IdentityKnowledgeGraph`, but **are never permanently stored or notarized to the blockchain** unless explicitly designated as verified targets by the investigator.
 
 <br/>
 

@@ -1,5 +1,5 @@
 """
-Web3 On-Chain Memory Synchronization module for FaceTrace.
+Web3 On-Chain Memory Synchronization module for Social Detective.
 
 Listens to `RecordRegistered` events emitted on Ethereum Sepolia,
 extracts decentralized IPFS CIDs, downloads verified identity records,

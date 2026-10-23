@@ -1,5 +1,5 @@
 """
-Decentralized Web3 & Knowledge Graph Memory Package for FaceTrace.
+Decentralized Web3 & Knowledge Graph Memory Package for Social Detective.
 """
 
 from app.memory.ipfs import IPFSClient, VerifiedIdentityPayload, calculate_ipfs_cid

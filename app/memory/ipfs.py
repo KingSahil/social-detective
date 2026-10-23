@@ -1,5 +1,5 @@
 """
-IPFS and decentralized content-addressing module for FaceTrace.
+IPFS and decentralized content-addressing module for Social Detective.
 
 Handles:
 - Building canonical verified identity payloads (embeddings, metadata, graph edges).
@@ -104,7 +104,7 @@ class IPFSClient:
                 body = {
                     "pinataContent": payload_dict,
                     "pinataMetadata": {
-                        "name": f"facetrace-identity-{cid[:12]}",
+                        "name": f"social-detective-identity-{cid[:12]}",
                         "keyvalues": {
                             "name": payload.name or "unknown",
                             "platform": payload.platform or "web",
@@ -146,7 +146,7 @@ class IPFSClient:
 
         # 2. Resolve via public IPFS gateways
         headers = {
-            "User-Agent": "FaceTrace-Decentralized-OSINT/1.0",
+            "User-Agent": "Social Detective-Decentralized-OSINT/1.0",
             "Accept": "application/json",
         }
         for gateway in PUBLIC_GATEWAYS:

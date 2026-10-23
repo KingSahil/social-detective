@@ -18,6 +18,7 @@ from PIL import Image
 
 from app.face import FaceProcessor
 from app.search import Candidate
+from app.tor_manager import TorManager
 
 
 @dataclass
@@ -48,7 +49,7 @@ class FaceMatcher:
         self._timeout = timeout
         # Shared keep-alive session: candidate images often come from the same
         # CDN hosts; reusing connections avoids a fresh TCP+TLS handshake each.
-        self._http = requests.Session()
+        self._http = TorManager.get_session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=35, pool_maxsize=35)
         self._http.mount("https://", adapter)
         self._http.mount("http://", adapter)

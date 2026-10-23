@@ -182,7 +182,7 @@ def _print_verification(result: dict) -> None:
 def main() -> None:
     """CLI entry point for standalone verification."""
     parser = argparse.ArgumentParser(
-        description="Verify a saved FaceTrace investigation record."
+        description="Verify a saved Social Detective investigation record."
     )
     parser.add_argument(
         "--record",

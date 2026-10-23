@@ -36,6 +36,14 @@ LENS_HEADLESS: bool = os.getenv("LENS_HEADLESS", "true").lower() not in ("false"
 LENS_TIMEOUT: float = float(os.getenv("LENS_TIMEOUT", "25.0"))
 
 # ---------------------------------------------------------------------------
+# Tor / Anonymity
+# ---------------------------------------------------------------------------
+USE_TOR: bool = os.getenv("USE_TOR", "false").lower() not in ("false", "0", "no", "")
+TOR_PROXY_URL: str = os.getenv("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
+TOR_CONTROL_PORT: int = int(os.getenv("TOR_CONTROL_PORT", "9051"))
+TOR_PASSWORD: str = os.getenv("TOR_PASSWORD", "")
+
+# ---------------------------------------------------------------------------
 # Blockchain
 # ---------------------------------------------------------------------------
 RPC_URL: str = os.getenv("RPC_URL", "")
@@ -55,7 +63,7 @@ PIVOT_ENABLED: bool = os.getenv("PIVOT_ENABLED", "true").lower() not in ("false"
 PIVOT_ENGINE: str = os.getenv("PIVOT_ENGINE", "wmn")
 PIVOT_MAX_SITES: int = int(os.getenv("PIVOT_MAX_SITES", "300"))
 PIVOT_TIMEOUT: float = float(os.getenv("PIVOT_TIMEOUT", "8.0"))
-PIVOT_SWEEP_TIMEOUT: float = float(os.getenv("PIVOT_SWEEP_TIMEOUT", "30.0"))
+PIVOT_SWEEP_TIMEOUT: float = float(os.getenv("PIVOT_SWEEP_TIMEOUT", "120.0"))
 PIVOT_MAX_WORKERS: int = int(os.getenv("PIVOT_MAX_WORKERS", "12"))
 PIVOT_MAX_ACCOUNTS: int = int(os.getenv("PIVOT_MAX_ACCOUNTS", "25"))
 PIVOT_MAX_CANDIDATES: int = int(os.getenv("PIVOT_MAX_CANDIDATES", "50"))

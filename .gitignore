@@ -59,3 +59,10 @@ data/memory/ipfs_cache/
 # Decentralized memory local storage
 data/memory/knowledge_graph.json
 data/memory/ipfs_cache/
+
+#testing images 
+data/input/
+
+1.txt
+2.txt
+3.txt

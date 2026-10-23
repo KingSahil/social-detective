@@ -1,1 +1,1 @@
-"""SocialDetective / FaceTrace — Face Search + Blockchain Verification."""
+"""SocialDetective / Social Detective — Face Search + Blockchain Verification."""

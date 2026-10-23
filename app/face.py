@@ -263,3 +263,55 @@ class FaceProcessor:
         crop = img[cy1:cy2, cx1:cx2]
         return crop
 
+    def annotate_and_extract_all_faces(self, image_path: str | Path) -> tuple[Optional[np.ndarray], list[dict]]:
+        """
+        Detects all faces in a crowd photo.
+        Returns:
+            - annotated_img: BGR numpy array with numbered bounding boxes drawn around each face.
+            - face_data: A list of dicts {'embedding': np.ndarray, 'bbox': list} corresponding to the numbers (1-indexed).
+        Returns (None, []) if the image fails to load or no faces are found.
+        """
+        image_path = str(image_path)
+        img = cv2.imread(image_path)
+        if img is None:
+            return None, []
+        
+        faces = self._app.get(img)
+        if not faces:
+            return img, []
+
+        annotated_img = img.copy()
+        face_data = []
+
+        # Sort faces from left-to-right based on x-coordinate
+        faces = sorted(faces, key=lambda f: f.bbox[0])
+
+        img_h, img_w = img.shape[:2]
+        font_scale = max(0.4, img_w / 1500.0)
+        thickness = max(1, int(font_scale * 2))
+        box_thickness = max(1, int(font_scale * 3))
+
+        for idx, face in enumerate(faces):
+            # 1-indexed numbering for user selection
+            face_id = idx + 1
+            x1, y1, x2, y2 = [int(v) for v in face.bbox]
+            
+            face_data.append({
+                'embedding': face.embedding,
+                'bbox': [x1, y1, x2, y2]
+            })
+            
+            # Draw bold rectangle
+            cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 255, 0), box_thickness)
+            
+            # Draw label background
+            label = f"#{face_id}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            (w, h), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            
+            cv2.rectangle(annotated_img, (x1, y1 - h - 10), (x1 + w + 10, y1), (0, 255, 0), -1)
+            cv2.putText(annotated_img, label, (x1 + 5, y1 - 5), font, font_scale, (0, 0, 0), thickness)
+
+        return annotated_img, face_data
+
+

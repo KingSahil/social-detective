@@ -1,5 +1,5 @@
 """
-Geolocation Intelligence (GEOINT) Module for FaceTrace.
+Geolocation Intelligence (GEOINT) Module for Social Detective.
 
 Analyzes images to determine geographic location using:
 1. Embedded EXIF GPS metadata + OpenStreetMap Nominatim reverse geocoding.
@@ -106,7 +106,7 @@ def reverse_geocode_osm(lat: float, lon: float, timeout: float = 3.0) -> Optiona
     """Reverse geocode decimal coordinates using OpenStreetMap Nominatim."""
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-        headers = {"User-Agent": "FaceTrace-OSINT-GEOINT/1.0"}
+        headers = {"User-Agent": "Social Detective-OSINT-GEOINT/1.0"}
         resp = requests.get(url, headers=headers, timeout=timeout)
         if resp.status_code == 200:
             data = resp.json()

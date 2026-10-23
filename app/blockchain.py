@@ -152,10 +152,12 @@ class BlockchainClient:
         priority_fee_gwei: float = 2.5,
         on_sent: Optional[Callable[[str], None]] = None,
         ipfs_cid: Optional[str] = None,
+        initial_timestamp: Optional[str] = None,
+        resolved_timestamp: Optional[str] = None,
     ) -> TxResult:
         """
         Call ``registerRecord(bytes32, string)`` on-chain using EIP-1559 Type-2 transactions.
-
+        
         Parameters
         ----------
         content_hash_hex : str
@@ -171,12 +173,20 @@ class BlockchainClient:
             Callback executed immediately after raw transaction broadcast.
         ipfs_cid : Optional[str]
             Decentralized IPFS Content Identifier for rich identity payload.
+        initial_timestamp: Optional[str]
+            For delayed discovery (Phase 1 ingestion timestamp)
+        resolved_timestamp: Optional[str]
+            For delayed discovery (Phase 4 resolution timestamp)
         """
         from app.hashing import hex_to_bytes32
 
         if ipfs_cid:
             clean_cid = ipfs_cid.removeprefix("ipfs://")
             source_id = f"{source_id}|ipfs://{clean_cid}" if source_id else f"ipfs://{clean_cid}"
+            
+        if initial_timestamp and resolved_timestamp:
+            delay_payload = f"delayed_discovery:{initial_timestamp}->{resolved_timestamp}"
+            source_id = f"{source_id}|{delay_payload}" if source_id else delay_payload
 
         hash_bytes = hex_to_bytes32(content_hash_hex)
 

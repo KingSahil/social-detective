@@ -1,5 +1,5 @@
 """
-Identity Knowledge Graph and Vector Memory module for FaceTrace.
+Identity Knowledge Graph and Vector Memory module for Social Detective.
 
 Maintains:
 - An in-memory and file-backed property graph (Persons, Accounts, Events).
@@ -36,6 +36,8 @@ class GraphPerson:
     verified_appearances: list[dict[str, str]] = field(default_factory=list)
     blockchain_hashes: list[str] = field(default_factory=list)
     ipfs_cids: list[str] = field(default_factory=list)
+    status: str = "verified"
+    added_at: str = ""
 
 
 class IdentityKnowledgeGraph:
@@ -157,3 +159,31 @@ class IdentityKnowledgeGraph:
             if p:
                 names.append(p.name)
         return names
+
+    def add_pending_target(self, embedding: list[float], image_path: str = "") -> GraphPerson:
+        import uuid
+        from datetime import datetime, timezone
+        person_id = f"pending_{uuid.uuid4().hex[:8]}"
+        person = GraphPerson(
+            id=person_id,
+            name="Unknown Pending Target",
+            embedding=embedding,
+            status="pending",
+            added_at=datetime.now(timezone.utc).isoformat()
+        )
+        if image_path:
+            person.verified_appearances.append({"image_url": "", "source_url": image_path})
+        self._persons[person_id] = person
+        self.save()
+        return person
+
+    def get_pending_targets(self) -> list[GraphPerson]:
+        return [p for p in self._persons.values() if getattr(p, "status", "verified") == "pending"]
+
+    def get_resolved_targets(self) -> list[GraphPerson]:
+        return [p for p in self._persons.values() if getattr(p, "status", "verified") == "resolved"]
+
+    def mark_resolved(self, person_id: str) -> None:
+        if person_id in self._persons:
+            self._persons[person_id].status = "resolved"
+            self.save()
